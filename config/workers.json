@@ -1,0 +1,16 @@
+{
+  "authentication": "chatgpt",
+  "live_submission_enabled": false,
+  "models": {
+    "discovery": {"model": "gpt-6-luna", "effort": "medium"},
+    "evaluation": {"model": "gpt-6.1-sol", "effort": "high"},
+    "materials": {"model": "gpt-6.1-sol", "effort": "high"},
+    "submission": {"model": "gpt-6-luna", "effort": "high"}
+  },
+  "browser_profile": "chrome",
+  "max_parallel_nonbrowser_workers": 2,
+  "worker_timeout_seconds": 240,
+  "pilot_company": null,
+  "excluded_pilot_companies": ["tesla"]
+}
+
