@@ -1,6 +1,6 @@
 # Application Pipeline
 
-Persistent local application tracking and company-by-company job pipelines. The agentic workflow uses the existing Codex/ChatGPT subscription; it does not configure a separate API-key inference service.
+Persistent local application tracking and company-by-company job pipelines. Workers use the existing Codex/ChatGPT subscription by default, with optional official DeepSeek API execution through the same CLI. Providers, models, efforts and browser runtimes are selectable independently in dashboard Settings.
 
 ## Current status — 2026-10-23
 
@@ -80,3 +80,6 @@ node --check app/static/app.js
 The earlier feed-first workflow, public Greenhouse/Lever adapters, and scripted evaluation/material/review workers remain available for historical records and bounded diagnostics. They are not the current agentic decision path; do not treat their fixed semantic gates or demo outcomes as current application decisions. The previous Greenhouse public-feed capture and older scripted demos are documented in [integration-status.md](integration-status.md).
 
 The canonical fictional browser-practice run completed on 2026-10-15 in about 193 seconds. The practice server verified the synthetic name, email, sponsorship choice, fixture filename, and uploaded file hash. The browser's email readback was masked; the local receipt is authoritative. This result proves only that fixed fictional form flow, not an employer submission.
+## Worker model settings
+
+The dashboard's **Settings** page lets you mix Codex subscription models and the official DeepSeek API independently for discovery, evaluation, documents and submission. Saved changes apply at the next invocation; running workers keep their execution snapshot. Existing Luna/Sol defaults and native CUA remain available. See [worker providers](docs/worker-providers.md) for setup, switch behavior, browser profiles and verification.

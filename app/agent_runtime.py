@@ -45,7 +45,7 @@ ROLE_PROMPTS = {
 }
 CUA_ROLES = {"discovery", "evaluator", "submission"}
 AGENT_BRIDGE_NAME = "agent_bridge"
-_API_KEY_NAMES = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN")
+_API_KEY_NAMES = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "DEEPSEEK_API_KEY")
 
 
 class AgentRuntimeError(RuntimeError):
@@ -74,7 +74,7 @@ def _redacted_stderr_excerpt(lines: list[str], capability: str | None, limit: in
     text = "\n".join(lines)
     if capability:
         text = text.replace(capability, "[REDACTED_CAPABILITY]")
-    text = re.sub(r"(?i)\b(AGENT_CAPABILITY|OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN)\s*[:=]\s*[^\s,;]+",
+    text = re.sub(r"(?i)\b(AGENT_CAPABILITY|OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|DEEPSEEK_API_KEY)\s*[:=]\s*[^\s,;]+",
                   r"\1=[REDACTED]", text)
     text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
     text = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[REDACTED_TOKEN]", text)
@@ -188,8 +188,18 @@ def _final_response(event: dict[str, Any]) -> dict[str, Any] | None:
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        # Some Responses-compatible providers wrap structured output in one
+        # trailing JSON fence despite the schema. Accept only that explicit
+        # envelope, never scrape arbitrary prose or infer task success.
+        blocks = re.findall(r"```(?:json)?\s*\n([\s\S]*?)\n```", text)
+        if len(blocks) != 1 or not text.rstrip().endswith("```"):
+            return None
+        try:
+            value = json.loads(blocks[0])
+        except json.JSONDecodeError:
+            return None
     if (isinstance(value, dict) and value.get("disposition") in {"completed", "waiting"}
+            and set(value) == {"disposition", "checkpoint", "summary"}
             and isinstance(value.get("checkpoint"), str)
             and isinstance(value.get("summary"), str)):
         return value
@@ -262,27 +272,38 @@ class CodexAgentRuntime:
 
     def _args(self, worker: dict[str, Any], schema_path: Path, bridge_env: dict[str, str]) -> list[str]:
         role = worker["role"]
-        model_key = ROLE_MODELS[role]
-        configured = self.config.get("models", {})
-        choice = configured.get(model_key)
-        if role == "document" and choice is None:
-            choice = configured.get("materials")
+        choice = self._choice(worker)
+        provider = choice.get("provider", "openai")
+        backend = choice.get("browser_backend", "cua")
         if not isinstance(choice, dict) or not isinstance(choice.get("model"), str):
             raise AgentRuntimeError(f"No model is configured for the {role} role.")
         effort = choice.get("effort", "medium")
 
         args = [self.codex, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
-                "--color", "never", "--model", choice["model"], "-c", 'model_provider="openai"',
-                "-c", 'forced_login_method="chatgpt"', "-c", f"model_reasoning_effort={_toml_string(effort)}",
+                "--color", "never", "--model", choice["model"], "-c", f'model_provider="{provider}"',
+                "-c", f"model_reasoning_effort={_toml_string(effort)}",
                 "-c", 'web_search="disabled"', "--output-schema", str(schema_path)]
+        if provider == "openai":
+            args.extend(["-c", 'forced_login_method="chatgpt"'])
+        elif provider == "deepseek":
+            # Do not force API login: that logs out the shared subscription CLI.
+            for key, value in {"name": "DeepSeek", "base_url": "https://api.deepseek.com", "wire_api": "responses",
+                               "env_key": "DEEPSEEK_API_KEY", "requires_openai_auth": False, "supports_websockets": False}.items():
+                args.extend(["-c", f"model_providers.deepseek.{key}=" + json.dumps(value)])
+            args.extend(["-c", "model_catalog_json=" + json.dumps(str(self.root / "config/deepseek-models.json")),
+                         "-c", "model_supports_reasoning_summaries=false"])
+        else:
+            raise AgentRuntimeError("Unsupported worker provider.")
         settings = self._read_cli_settings()
         browser_role = role in CUA_ROLES
-        allowed_plugins = {"unified-computer-use"} if browser_role else set()
+        allowed_plugins = {"unified-computer-use"} if browser_role and backend == "cua" else set()
+        plugin_entries = []
         for plugin in settings.get("plugins", {}):
             base_plugin = plugin.split("@", 1)[0]
             enabled = base_plugin in allowed_plugins
-            key = f"plugins.{_toml_key_segment(plugin)}.enabled"
-            args.extend(["-c", key + ("=true" if enabled else "=false")])
+            plugin_entries.append(_toml_key_segment(plugin) + "={enabled=" + ("true" if enabled else "false") + "}")
+        if plugin_entries:
+            args.extend(["-c", "plugins={" + ",".join(plugin_entries) + "}"])
 
         # Per-run allow list: preserve the supported CUA plugin for browser
         # roles, and disable every other MCP server known to the current CLI.
@@ -294,7 +315,7 @@ class CodexAgentRuntime:
             enabled = False
             key = f"mcp_servers.{_mcp_config_segment(server)}.enabled"
             args.extend(["-c", key + ("=true" if enabled else "=false")])
-        if not browser_role:
+        if not browser_role or backend != "cua":
             # The desktop host exposes CUA as a managed server independently of
             # the plugin toggle. Give the disabled shadow entry a valid stdio
             # transport so Codex config validation accepts it, without launching
@@ -302,6 +323,9 @@ class CodexAgentRuntime:
             args.extend(["-c", f"mcp_servers.cua_repl.command={_toml_string(sys.executable)}",
                          "-c", "mcp_servers.cua_repl.args=[]",
                          "-c", "mcp_servers.cua_repl.enabled=false"])
+        if browser_role and backend == "playwright":
+            from .browser_backends import playwright_args
+            args.extend(playwright_args(self.root, worker))
 
         # The bridge itself is added only for this process invocation. All other
         # users' auth/configuration remains untouched.
@@ -338,7 +362,28 @@ class CodexAgentRuntime:
         args.append("-")
         return args
 
-    def _prompt(self, task: dict[str, Any], worker: dict[str, Any]) -> str:
+    def _choice(self, worker):
+        context = worker.get("context") or {}
+        if isinstance(context, str):
+            context = json.loads(context)
+        if isinstance(context.get("execution"), dict):
+            return context["execution"]
+        key = ROLE_MODELS[worker["role"]]
+        configured = self.config.get("models", {})
+        choice = configured.get(key) or (configured.get("materials") if worker["role"] == "document" else None)
+        return {"provider": "openai", "browser_backend": "none" if worker["role"] == "document" else "cua", **(choice or {})}
+
+    def _prompt(self, task, worker):
+        result = self._base_prompt(task, worker)
+        if self._choice(worker).get("browser_backend") == "playwright":
+            result += "\n\n" + (self.root / "prompts/browser_playwright.md").read_text(encoding="utf-8")
+        result += ('\n\nFINAL OUTPUT CONTRACT: End with exactly one JSON object and no prose or Markdown, for example '
+                   '{"disposition":"completed","checkpoint":"short saved label","summary":"brief actual outcome"}. '
+                   'Disposition is either "completed" or "waiting". Use only those three keys. '
+                   'Tool observations and durable bridge actions remain required; final text alone never records success.')
+        return result
+
+    def _base_prompt(self, task: dict[str, Any], worker: dict[str, Any]) -> str:
         prompt_file = self.root / "prompts" / ROLE_PROMPTS[worker["role"]]
         if not prompt_file.is_file():
             raise AgentRuntimeError(f"Missing role prompt: {prompt_file.name}")
@@ -348,7 +393,7 @@ class CodexAgentRuntime:
         if isinstance(worker_view.get("context"), dict):
             worker_view["context"] = {key: value for key, value in worker_view["context"].items()
                                       if key not in {"draft_artifacts", "ready_artifacts", "inbox_history",
-                                                     "manifest_path", "manifest_sha256", "prepared_documents"}}
+                                                     "manifest_path", "manifest_sha256", "prepared_documents", "execution_history"}}
         context = task.get("task_context") or {}
         if not isinstance(context, dict):
             raise AgentRuntimeError("Task context must be an object.")
@@ -454,6 +499,19 @@ class CodexAgentRuntime:
                 "AGENT_CAPABILITY": capability, "AGENT_ROLE": worker["role"]}
 
     @staticmethod
+    def _playwright_tool_result(event, session_id):
+        item = event.get("item") or {}
+        if (event.get("type") != "item.completed" or item.get("type") != "mcp_tool_call"
+                or item.get("server") != "playwright"):
+            return None
+        result = item.get("result")
+        failed = bool(item.get("error")) or item.get("status") in {"failed", "error"} or isinstance(result, dict) and result.get("isError") is True
+        if not isinstance(result, dict) and not failed:
+            return None
+        return {"type": "tool_result", "tool_name": "playwright." + str(item.get("tool")), "success": not failed,
+                "session_id": session_id, "transport_event": event}
+
+    @staticmethod
     def _cua_tool_result(event: dict[str, Any], session_id: str | None) -> dict[str, Any] | None:
         """Project only a completed actual CUA MCP result, including failures."""
         item = event.get("item")
@@ -483,7 +541,7 @@ class CodexAgentRuntime:
                 and item.get("tool") == "js")
 
     @staticmethod
-    def _tool_access_violation(event: dict[str, Any], role: str) -> str | None:
+    def _tool_access_violation(event: dict[str, Any], role: str, backend="cua") -> str | None:
         """Reject host actions outside the bridge and the role's CUA surface."""
         if event.get("type") not in {"item.started", "item.completed"}:
             return None
@@ -499,8 +557,12 @@ class CodexAgentRuntime:
             server, tool = item.get("server"), item.get("tool")
             if server == AGENT_BRIDGE_NAME:
                 return None
-            if role in CUA_ROLES and server == "cua_repl" and tool == "js":
+            if role in CUA_ROLES and backend == "cua" and server == "cua_repl" and tool == "js":
                 return None
+            if role in CUA_ROLES and backend == "playwright" and server == "playwright":
+                from .browser_backends import PLAYWRIGHT_TOOLS
+                if tool in PLAYWRIGHT_TOOLS:
+                    return None
             return "mcp_tool_call"
         return None
 
@@ -595,6 +657,7 @@ class CodexAgentRuntime:
                 "run_id": run_id,
                 "worker_id": worker.get("id"),
                 "role": worker.get("role"),
+                "execution": self._choice(worker) if worker.get("role") else None,
                 "session_id": result.get("session_id", worker.get("session_id")),
                 "checkpoint": result.get("checkpoint", worker.get("checkpoint") or "launch"),
                 "disposition": disposition,
@@ -644,16 +707,25 @@ class CodexAgentRuntime:
             schema_path = run_dir / "final-schema.json"
             schema_path.write_text(json.dumps(FINAL_SCHEMA), encoding="utf-8")
             bridge_env = self._bridge_environment(worker, capability, self.root)
+            choice = self._choice(worker)
+            if choice.get("provider") == "deepseek":
+                bridge_env["AGENT_IMAGE_CONTENT_ONLY"] = "1"
             prompt = self._prompt(task, worker)
             args = self._args(worker, schema_path, bridge_env)
             env = codex_invocation_env(self.root, run_id, os.environ.copy())
             for key in _API_KEY_NAMES:
                 env.pop(key, None)
-            if not self._login_ok(env):
+            if choice.get("provider") == "deepseek":
+                from .provider_credentials import ProviderCredentials
+                key = ProviderCredentials(self.root).get()
+                if not key:
+                    raise AgentRuntimeError("DeepSeek API key is not configured. Open Settings to add it.")
+                env["DEEPSEEK_API_KEY"] = key
+            elif not self._login_ok(env):
                 return finish({"disposition": "failed", "session_id": worker.get("session_id"),
                         "resume_mode": "resume" if worker.get("session_id") else "new",
                         "checkpoint": worker.get("checkpoint") or "launch", "error": "ChatGPT subscription sign-in is unavailable."})
-        except (AgentRuntimeError, OSError, ValueError, json.JSONDecodeError) as error:
+        except (AgentRuntimeError, OSError, ValueError, RuntimeError) as error:
             return finish({"disposition": "failed", "error": str(error)})
 
         try:
@@ -737,7 +809,15 @@ class CodexAgentRuntime:
                 continue
             if not isinstance(event, dict):
                 continue
-            timing.observe(event)
+            timing_item = event.get("item") or {}
+            if timing_item.get("type") == "mcp_tool_call" and timing_item.get("server") == "playwright":
+                if event.get("type") == "item.started":
+                    timing.tool_start(timing_item["id"], "playwright." + str(timing_item.get("tool")), "browser")
+                elif event.get("type") == "item.completed":
+                    value = timing_item.get("result")
+                    timing.tool_end(timing_item["id"], not bool(timing_item.get("error") or isinstance(value, dict) and value.get("isError")))
+            else:
+                timing.observe(event)
             callback_count += 1
             session = self._session_id(event)
             if session:
@@ -756,7 +836,7 @@ class CodexAgentRuntime:
             structured_error = _error_from_event(event)
             if structured_error:
                 provider_error = structured_error
-            access_violation = self._tool_access_violation(event, worker["role"])
+            access_violation = self._tool_access_violation(event, worker["role"], self._choice(worker).get("browser_backend", "cua"))
             if access_violation:
                 tool_violation = tool_violation or access_violation
                 try:
@@ -777,7 +857,7 @@ class CodexAgentRuntime:
                     stop_sent_at = time.monotonic()
                     self._interrupt(process)
             try:
-                evidence_event = self._cua_tool_result(event, last_session)
+                evidence_event = self._cua_tool_result(event, last_session) or self._playwright_tool_result(event, last_session)
                 on_event(evidence_event or event)
                 usage_event = self._usage_event(
                     event, last_session, tool_call_count=tool_call_count,

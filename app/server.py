@@ -35,6 +35,22 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class WorkerChoice(Strict):
+    provider: str = Field(max_length=40)
+    model: str = Field(max_length=100)
+    effort: str = Field(max_length=20)
+    browser_backend: str = Field(max_length=30)
+
+
+class WorkerSettingsInput(Strict):
+    revision: int = Field(ge=0, strict=True)
+    roles: dict[str, WorkerChoice]
+
+
+class ProviderKeyInput(Strict):
+    api_key: str = Field(min_length=1, max_length=4096, repr=False)
+
+
 class CompanyInput(Strict):
     id: str
     name: str
@@ -284,6 +300,9 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
 
     app = FastAPI(title="Application Pipeline", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.store = store
+    from .provider_credentials import ProviderCredentials
+    from .worker_settings import SettingsConflict
+    app.state.provider_credentials = ProviderCredentials(root)
     app.state.execution_host = execution_host
     app.state.token = secrets.token_urlsafe(32)
     app.state.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="application-worker")
@@ -314,6 +333,18 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     async def conflict_handler(request, error):
         return JSONResponse({"detail": str(error)}, status_code=409)
 
+    @app.exception_handler(SettingsConflict)
+    async def settings_conflict_handler(request, error):
+        return JSONResponse({"detail": str(error)}, status_code=409)
+
+    # Validation failures must not reflect a credential's input value.
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request, error):
+        errors = [{k: v for k, v in item.items() if k in {"loc", "msg", "type"}} for item in error.errors()]
+        return JSONResponse({"detail": errors}, status_code=422)
+
     @app.exception_handler(ValueError)
     async def value_handler(request, error):
         return JSONResponse({"detail": str(error)}, status_code=422)
@@ -328,7 +359,7 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
 
     @app.get("/static/{filename}")
     def static(filename: str):
-        if filename not in {"app.js", "style.css", "theme.css", "practice.js", "orbit-mark.svg", "space-grotesk.ttf",
+        if filename not in {"app.js", "settings.js", "style.css", "theme.css", "practice.js", "orbit-mark.svg", "space-grotesk.ttf",
                              "dm-sans.ttf", "space-grotesk-license.txt", "dm-sans-license.txt"}:
             raise HTTPException(404)
         media_type = "font/ttf" if filename.endswith(".ttf") else "image/svg+xml" if filename.endswith(".svg") else None
@@ -438,6 +469,25 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     @app.get("/api/efficiency")
     def efficiency(pipeline_id: str | None = None):
         return store.get_agent_efficiency(pipeline_id)
+
+    @app.get("/api/settings/workers")
+    def worker_settings():
+        return store.get_worker_settings()
+
+    @app.put("/api/settings/workers")
+    def update_worker_settings(value: WorkerSettingsInput):
+        return store.save_worker_settings(value.revision, {k: v.model_dump() for k, v in value.roles.items()})
+
+    @app.put("/api/settings/providers/deepseek/key")
+    def save_deepseek_key(value: ProviderKeyInput):
+        try:
+            return app.state.provider_credentials.save(value.api_key)
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from None
+
+    @app.delete("/api/settings/providers/deepseek/key")
+    def remove_deepseek_key():
+        return app.state.provider_credentials.remove()
 
     @app.get("/api/pipelines/{pipeline_id}/runtime-status")
     def runtime_status(pipeline_id: str):

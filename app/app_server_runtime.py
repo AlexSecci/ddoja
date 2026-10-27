@@ -210,7 +210,7 @@ class CodexAppServerRuntime:
         session = worker.get("session_id")
         if not capability or session and not self.supports_session(session):
             return {"disposition": "failed", "error": "The saved session belongs to another transport."}
-        choice = self.cli.config["models"].get("document") or self.cli.config["models"]["materials"]
+        choice = self.cli._choice(worker)
         bridge = AgentMCPBridge(worker["id"], capability, "document", self.store.agent_action,
                                 lambda value: render_and_register_documents(self.store, worker["id"], capability, value))
         thread_id = session.removeprefix("app_server:") if session else None

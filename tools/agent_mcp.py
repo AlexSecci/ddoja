@@ -61,7 +61,7 @@ _LISTING_CAPTURE = _object({
 # membership, snapshots, policy approvals and state transitions.
 TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
     "get_browser_guidance": {
-        "description": "Read the installed Computer Use SKILL.md or its bundled guidance/confirmations/API directly from the filesystem through this bridge. Use this for mandatory skill reading; shell/file execution is not needed. It cannot read arbitrary files.",
+        "description": "Read guidance for this worker's assigned browser runtime. Native CUA returns its installed skill/API; Playwright returns its runtime adapter. Shell/file execution is not needed and arbitrary files cannot be read.",
         "inputSchema": _object({"document": {"type": "string", "enum": ["skill", "guidance", "confirmations", "api"]}}, ("document",)),
         "annotations": {"readOnlyHint": True},
     },
@@ -115,7 +115,7 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
                                               "minItems": 1, "maxItems": 10}}, ("listings",)),
     },
     "capture_listing_batch": {
-        "description": "Capture up to 10 listings from exact text blocks in the latest successful CUA result for this worker/session. Supply unique exact start/end markers around each full job description; do not copy the JD into tool arguments. Store extracts the exact observed slice, hashes and versions it, and binds it to the actual browser event. Selection remains your decision.",
+        "description": "Capture up to 10 listings from exact text blocks in the latest successful browser result for this worker/session. Supply unique exact start/end markers around each full job description; do not copy the JD into tool arguments. Store extracts the exact observed slice, hashes and versions it, and binds it to the actual browser event. Selection remains your decision.",
         "inputSchema": _object({"listings": {"type": "array", "items": _LISTING_CAPTURE,
                                               "minItems": 1, "maxItems": 10}}, ("listings",)),
     },
@@ -353,7 +353,7 @@ def _text_result(value: Any, image_blocks: list[dict[str, str]] | None = None) -
     result = {"content": [{"type": "text", "text": encoded}, *(image_blocks or [])], "isError": False}
     # Newer MCP clients can use structuredContent; the text block remains the
     # interoperable representation for Codex versions that ignore it.
-    if isinstance(value, dict):
+    if isinstance(value, dict) and not (image_blocks and os.environ.get("AGENT_IMAGE_CONTENT_ONLY") == "1"):
         result["structuredContent"] = value
     return result
 

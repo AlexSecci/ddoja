@@ -253,8 +253,11 @@ def test_runtime_runs_then_resumes_same_saved_codex_session_without_capability_i
     assert "capability-fixture-never-in-argv" not in " ".join(first_args)
     assert first_env["AGENT_CAPABILITY"] == "capability-fixture-never-in-argv"
     assert "OPENAI_API_KEY" not in first_env and "CODEX_API_KEY" not in first_env
-    assert 'plugins."unified-computer-use@openai-bundled".enabled=true' in first_args
-    assert 'plugins."documents@openai-primary-runtime".enabled=false' in first_args
+    import tomllib
+    plugin_arg = next(arg for arg in first_args if arg.startswith("plugins="))
+    plugins = tomllib.loads(plugin_arg)["plugins"]
+    assert plugins["unified-computer-use@openai-bundled"]["enabled"] is True
+    assert plugins["documents@openai-primary-runtime"]["enabled"] is False
     assert "mcp_servers.node_repl.enabled=false" in first_args
     assert not any(argument.startswith("mcp_servers.cua_repl.") for argument in first_args)
     assert 'mcp_servers.agent_bridge.env_vars=["AGENT_ROOT", "AGENT_WORKER_ID", "AGENT_CAPABILITY", "AGENT_ROLE"]' in first_args

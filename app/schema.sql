@@ -221,10 +221,16 @@ CREATE TABLE IF NOT EXISTS agent_usage(
  input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER, reasoning_tokens INTEGER,
  delta_input_tokens INTEGER, delta_output_tokens INTEGER, delta_cached_input_tokens INTEGER, delta_reasoning_tokens INTEGER,
  tool_call_count INTEGER, elapsed_seconds REAL, counter_source TEXT,
- created_at TEXT NOT NULL,
+ created_at TEXT NOT NULL, execution TEXT NOT NULL DEFAULT '{}',
  PRIMARY KEY(worker_id,session_id,turn_id)
 );
 CREATE INDEX IF NOT EXISTS agent_usage_pipeline_worker ON agent_usage(worker_id,created_at);
+
+CREATE TABLE IF NOT EXISTS agent_execution_runs(
+ worker_id TEXT NOT NULL REFERENCES agent_workers(id), generation INTEGER NOT NULL,
+ execution TEXT NOT NULL, previous_session_id TEXT, started_at TEXT NOT NULL,
+ finished_at TEXT, state TEXT, PRIMARY KEY(worker_id,generation)
+);
 
 CREATE TABLE IF NOT EXISTS agent_submission_results(
  id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL REFERENCES pipelines(id),

@@ -44,7 +44,10 @@ class HybridRuntime:
         envelope = task.get("task", task)
         worker = envelope.get("worker") or {}
         session = worker.get("session_id")
-        if session:
+        execution = (worker.get("context") or {}).get("execution", {})
+        if execution.get("transport"):
+            mode = execution["transport"]
+        elif session:
             mode = "app_server" if str(session).startswith("app_server:") else "exec"
         else:
             mode = "app_server" if worker.get("role") == "document" else "exec"

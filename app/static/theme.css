@@ -482,3 +482,10 @@ footer { margin-top: 25px; padding-top: 20px; color: #a08baa; border-color: #322
   :root, body { color: #111; background: #fff; color-scheme: light; }
   .pipeline-card { break-inside: avoid; }
 }
+/* Worker preferences are stable while the rest of the dashboard polls. */
+.worker-settings-panel, .provider-key-panel { margin-bottom: 24px; }
+#settings > .panel { padding: 24px; }
+.worker-settings-row { border: 0; padding: 20px 0; margin: 0; border-bottom: 1px solid var(--border, #35353b); }
+.worker-settings-row legend { font-weight: 600; padding: 0; }
+.worker-settings-row .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 680px) { .worker-settings-row .form-grid { grid-template-columns: 1fr; } }

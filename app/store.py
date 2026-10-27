@@ -57,7 +57,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "first_application_review_required", "parent_context", "snapshot_supersession",
     "profile_refresh_supersession",
     "discovery_turn_baseline", "last_context_revision", "browser_wait_scope", "instruction_digest",
-    "reconciliation_recovery",
+    "reconciliation_recovery", "execution", "execution_history", "execution_handoff", "execution_change_deferred",
 }
 
 AGENT_DISCOVERY_PROGRESS_FIELDS = {
@@ -72,6 +72,24 @@ class Conflict(ValueError):
 
 
 class Store:
+    def get_worker_settings(self):
+        from .worker_settings import read_settings, model_catalog, ROLE_LABELS
+        from .provider_credentials import ProviderCredentials
+        from .browser_backends import playwright_status
+        with self.connect() as db:
+            saved = read_settings(self.root, db)
+        return {**saved, "providers": model_catalog(self.root), "role_labels": ROLE_LABELS,
+                "credentials": {"deepseek": ProviderCredentials(self.root).status()},
+                "playwright": playwright_status(self.root)}
+
+    def save_worker_settings(self, revision, roles):
+        from .worker_settings import save_settings
+        with self.connect(write=True) as db:
+            saved = save_settings(self.root, db, revision, roles)
+            self.event(db, "agent.worker_settings_changed", saved, actor="user")
+        # A preferences change never schedules, resumes, stops or replaces work.
+        return self.get_worker_settings()
+
     def __init__(self, root):
         self.root = Path(root).resolve()
         (self.root / "data").mkdir(parents=True, exist_ok=True)
@@ -100,6 +118,8 @@ class Store:
             worker_columns = {row[1] for row in db.execute("PRAGMA table_info(agent_workers)")}
             if "turn_active" not in worker_columns:
                 db.execute("ALTER TABLE agent_workers ADD COLUMN turn_active INTEGER NOT NULL DEFAULT 0")
+            if "execution" not in {row[1] for row in db.execute("PRAGMA table_info(agent_usage)")}:
+                db.execute("ALTER TABLE agent_usage ADD COLUMN execution TEXT NOT NULL DEFAULT '{}'")
             artifact_columns = {row[1] for row in db.execute("PRAGMA table_info(agent_artifacts)")}
             for name, declaration in (("pdf_path", "TEXT NOT NULL DEFAULT ''"),
                                       ("pdf_sha256", "TEXT NOT NULL DEFAULT ''"),
@@ -2274,7 +2294,7 @@ class Store:
         """Validate the immutable job/profile snapshot attached to an approval."""
         context = inbox.get("context") if isinstance(inbox.get("context"), dict) else self._agent_decode(inbox.get("context"), {})
         if inbox.get("action") == "browser_circuit_recovery":
-            control = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key='connector:cua_repl'").fetchone()
+            control = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key=?", (context.get("scope") or "connector:cua_repl",)).fetchone()
             if (not control or control["state"] != "open" or control["worker_id"] != inbox.get("worker_id")
                     or context.get("source_event_id") not in self._agent_decode(control["event_ids"], [])):
                 return "This connector recovery checkpoint has been superseded."
@@ -2690,7 +2710,7 @@ class Store:
             result["source_job_id"] = job_id
             return result
 
-    def _agent_evaluation_cache_snapshot(self, db, pipeline_id, job_id, jd_version):
+    def _agent_evaluation_cache_snapshot(self, db, pipeline_id, job_id, jd_version, execution=None):
         """Build a fail-closed key for reusable agent-authored decisions."""
         pipeline = db.execute("SELECT p.filters,p.company_id FROM pipelines p WHERE p.id=? AND p.mode='agentic'",
                               (pipeline_id,)).fetchone()
@@ -2705,7 +2725,12 @@ class Store:
             core = self.root / "prompts/agent_core.md"
             prompt_hash = hashlib.sha256(prompt_path.read_bytes() + (core.read_bytes() if core.is_file() else b"")).hexdigest()
             worker_config = json.loads(config_path.read_text(encoding="utf-8"))
-            model_config = worker_config.get("models", {}).get("evaluation")
+            from .worker_settings import read_settings
+            model_config = dict(execution or read_settings(self.root, db)["roles"]["evaluation"])
+            model_config.pop("settings_revision", None)
+            model_config.pop("transport", None)
+            if model_config.get("browser_backend") == "playwright":
+                prompt_hash = hashlib.sha256((prompt_hash + (self.root / "prompts/browser_playwright.md").read_text(encoding="utf-8")).encode()).hexdigest()
             if not isinstance(model_config, dict) or not isinstance(model_config.get("model"), str):
                 return None
         except (OSError, UnicodeError, json.JSONDecodeError):
@@ -2748,7 +2773,8 @@ class Store:
                     "policy_sha256": digest(json.dumps(policy, ensure_ascii=False, sort_keys=True,
                                                        separators=(",", ":"))),
                     "prompt_sha256": prompt_hash,
-                    "model": model_config["model"], "effort": model_config.get("effort", "medium")}
+                    "model": model_config["model"], "effort": model_config.get("effort", "medium"),
+                    "provider": model_config.get("provider", "openai"), "browser_backend": model_config.get("browser_backend", "cua")}
         key = digest(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return {"cache_key": key, "snapshot": snapshot,
                 "policy_sha256": snapshot["policy_sha256"], "model": snapshot["model"]}
@@ -2952,7 +2978,7 @@ class Store:
         if not session_id:
             return None
         row = db.execute("SELECT id,session_id,payload FROM agent_runtime_events WHERE worker_id=? AND session_id=? "
-                         "AND tool_name='cua_repl.js' AND success=1 ORDER BY rowid DESC LIMIT 1",
+                         "AND (tool_name='cua_repl.js' OR tool_name LIKE 'playwright.%') AND success=1 ORDER BY rowid DESC LIMIT 1",
                          (worker["id"], session_id)).fetchone()
         if not row:
             return None
@@ -2962,15 +2988,16 @@ class Store:
         result = item.get("result") if isinstance(item, dict) else None
         content = result.get("content") if isinstance(result, dict) else None
         if (payload.get("transport_event_truncated") or not isinstance(item, dict)
-                or item.get("type") != "mcp_tool_call" or item.get("server") != "cua_repl"
-                or item.get("tool") != "js" or not isinstance(content, list)):
+                or item.get("type") != "mcp_tool_call"
+                or not (item.get("server") == "cua_repl" and item.get("tool") == "js" or item.get("server") == "playwright")
+                or not isinstance(content, list)):
             return None
         return {"event_id": row["id"], "session_id": row["session_id"], "content": content}
 
     @staticmethod
     def _agent_capture_description(capture, pointer):
         if not capture:
-            raise Conflict("Capture a complete job description from a successful CUA result in this worker's current session first.")
+            raise Conflict("Capture a complete job description from a successful browser result in this worker's current session first.")
         if not isinstance(pointer, dict):
             raise ValueError("A description pointer must identify one exact text block and unique start/end markers.")
         block_index = pointer.get("text_block")
@@ -3513,7 +3540,7 @@ class Store:
             worker_view.pop("result", None)
             notes = worker_view.get("context", {})
             bounded, used = {}, 0
-            priority = ["final_action_may_have_been_sent", "final_action_authorized_at", "tab_recovery", "question_reconsideration", "requested_artifacts",
+            priority = ["execution", "execution_handoff", "execution_change_deferred", "final_action_may_have_been_sent", "final_action_authorized_at", "tab_recovery", "question_reconsideration", "requested_artifacts",
                         "tab_id", "tab_url", "current_url", "page_cursor", "current_page", "remaining_paths"]
             for key in dict.fromkeys([*priority, *notes]):
                 if key not in notes or key == "instruction_digest":
@@ -3530,6 +3557,8 @@ class Store:
             prompt_names = {"discovery": "discovery_agent.md", "evaluator": "evaluation_agent.md",
                             "submission": "submission_agent.md", "document": "document_agent.md"}
             prompt_files = [self.root / "prompts" / prompt_names[worker["role"]], self.root / "prompts/agent_core.md"]
+            if saved_context.get("execution", {}).get("browser_backend") == "playwright":
+                prompt_files.append(self.root / "prompts/browser_playwright.md")
             instruction_digest = digest("\n".join(path.read_text(encoding="utf-8") for path in prompt_files if path.is_file())
                                         + json.dumps(self._agent_career_scope(), sort_keys=True))
             instructions_changed = bool(saved_context.get("instruction_digest") != instruction_digest)
@@ -3605,7 +3634,8 @@ class Store:
         # series of otherwise valid offline evaluations.
         circuit = db.execute("SELECT 1 FROM agent_browser_controls WHERE scope_key='connector:cua_repl' "
                              "AND control_type='connector_circuit' AND state='open'").fetchone()
-        if circuit:
+        from .worker_settings import read_settings
+        if circuit and read_settings(self.root, db)["roles"]["submission"]["browser_backend"] == "cua":
             approved_limit = min(approved_limit, 3)
         if worker["role"] == "evaluator" and backlog >= approved_limit:
             return {"reason": "Approved applications are waiting for submission capacity.",
@@ -3638,7 +3668,11 @@ class Store:
                 return False
             circuit = db.execute("SELECT state,worker_id FROM agent_browser_controls WHERE scope_key='connector:cua_repl' "
                                  "AND control_type='connector_circuit'").fetchone()
-            if (circuit and circuit["state"] == "open" and row["role"] in {"discovery", "submission"}
+            from .worker_settings import desired_execution
+            desired = desired_execution(self.root, db, row)
+            prior_execution = self._agent_decode(row["context"], {}).get("execution", {})
+            backend = (prior_execution if self._context_may_have_sent_final(self._agent_decode(row["context"], {}), row["checkpoint"]) else desired).get("browser_backend", "cua")
+            if (backend == "cua" and circuit and circuit["state"] == "open" and row["role"] in {"discovery", "submission"}
                     and circuit["worker_id"] != worker_id):
                 return False
             if row["role"] == "submission":
@@ -3676,13 +3710,16 @@ class Store:
             if row["role"] == "submission" and company_auth and company_auth["state"] == "open" and company_auth["worker_id"] != worker_id:
                 self._agent_transfer_auth_owner(db, company_auth, row)
             now = timestamp()
+            from .worker_settings import pin_execution
+            execution = pin_execution(self.root, db, row,
+                may_have_sent=self._context_may_have_sent_final(self._agent_decode(row["context"], {}), row["checkpoint"]), now=now)
             db.execute("UPDATE agent_workers SET state='running',turn_active=1,started_at=COALESCE(started_at,?),"
                        "updated_at=?,error='',provider_error='' WHERE id=? AND state='queued'",
                        (now, now, worker_id))
             db.execute("UPDATE pipelines SET status='running',finished_at=NULL,updated_at=? WHERE id=? AND stop_requested=0",
                        (now, row["pipeline_id"]))
             self.event(db, "agent.worker_started", {"worker_id": worker_id, "pipeline_id": row["pipeline_id"],
-                       "role": row["role"], "resume_mode": row["resume_mode"]}, row["job_id"], "agent_scheduler")
+                       "role": row["role"], "resume_mode": row["resume_mode"], "execution": execution}, row["job_id"], "agent_scheduler")
             return True
 
     def release_agent_worker_reservation(self, worker_id):
@@ -3826,7 +3863,7 @@ class Store:
             "authorized_at": now, "source": source, "fresh_tab_budget": 1,
             "canonical_url": job["url"] if job else company["careers_url"]}
         if worker["role"] == "submission" and (worker["session_id"] or context.get("tab_id")):
-            last = db.execute("SELECT id FROM agent_runtime_events WHERE worker_id=? AND tool_name='cua_repl.js' "
+            last = db.execute("SELECT id FROM agent_runtime_events WHERE worker_id=? AND (tool_name='cua_repl.js' OR tool_name LIKE 'playwright.%') "
                               "ORDER BY rowid DESC LIMIT 1", (worker["id"],)).fetchone()
             context["browser_freshness"] = {"pending": True, "epoch": epoch, "issued_at": now,
                 "reason": source, "previous_browser_event_id": last["id"] if last else None,
@@ -4139,9 +4176,9 @@ class Store:
                     metadata["timing"] = event["timing"]
                 transport = event.get("transport_event", {})
                 item = transport.get("item", {}) if isinstance(transport, dict) else {}
-                if item.get("type") == "mcp_tool_call" and item.get("server") == "cua_repl" and item.get("tool") == "js":
+                if item.get("type") == "mcp_tool_call" and (item.get("server") == "playwright" or item.get("server") == "cua_repl" and item.get("tool") == "js"):
                     metadata["transport_event"] = {"type": transport.get("type"), "item": {
-                        "type": "mcp_tool_call", "server": "cua_repl", "tool": "js", "status": item.get("status")}}
+                        "type": "mcp_tool_call", "server": item.get("server"), "tool": item.get("tool"), "status": item.get("status")}}
                     safe_url = self._agent_observed_application_url(db, row, event)
                     if safe_url:
                         metadata["observed_application_url"] = safe_url
@@ -4209,7 +4246,7 @@ class Store:
 
         names = ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens")
         with self.connect(write=True) as db:
-            worker = db.execute("SELECT pipeline_id,role FROM agent_workers WHERE id=?", (worker_id,)).fetchone()
+            worker = db.execute("SELECT pipeline_id,role,context FROM agent_workers WHERE id=?", (worker_id,)).fetchone()
             if not worker:
                 raise KeyError(worker_id)
             prior_turn = db.execute("SELECT * FROM agent_usage WHERE worker_id=? AND session_id=? AND turn_id=?",
@@ -4256,12 +4293,12 @@ class Store:
             now = timestamp()
             db.execute("INSERT INTO agent_usage(worker_id,session_id,turn_id,counter_kind,input_tokens,output_tokens,"
                        "cached_input_tokens,reasoning_tokens,delta_input_tokens,delta_output_tokens,"
-                       "delta_cached_input_tokens,delta_reasoning_tokens,tool_call_count,elapsed_seconds,counter_source,created_at) "
-                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       "delta_cached_input_tokens,delta_reasoning_tokens,tool_call_count,elapsed_seconds,counter_source,created_at,execution) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (worker_id, session_id, turn_id, counter_kind, values["input_tokens"], values["output_tokens"],
                         values["cached_input_tokens"], values["reasoning_tokens"], delta["input_tokens"],
                         delta["output_tokens"], delta["cached_input_tokens"], delta["reasoning_tokens"],
-                        tool_calls, elapsed, source, now))
+                        tool_calls, elapsed, source, now, json.dumps(self._agent_decode(worker["context"], {}).get("execution", {}))))
             usage_delta = self._agent_usage_delta_view(delta, tool_calls=tool_calls, elapsed=elapsed)
             self.event(db, "agent.usage_delta", {"worker_id": worker_id, "pipeline_id": worker["pipeline_id"],
                        "role": worker["role"], "session_id": session_id, "turn_id": turn_id,
@@ -4287,11 +4324,18 @@ class Store:
             rows = db.execute("SELECT w.role,u.* FROM agent_usage u JOIN agent_workers w ON w.id=u.worker_id "
                               + where + " ORDER BY u.created_at,u.worker_id,u.session_id,u.turn_id", params).fetchall()
             roles = sorted({row["role"] for row in rows})
+            execution_groups = {}
+            for row in rows:
+                execution = self._agent_decode(row["execution"], {})
+                identity = tuple(execution.get(k) for k in ("provider", "model", "effort", "browser_backend"))
+                execution_groups.setdefault(identity, []).append(row)
             result = {"pipeline_id": pipeline_id,
                       "totals": self._agent_usage_totals(rows),
                       "by_role": {role: self._agent_usage_totals([row for row in rows if row["role"] == role])
                                   for role in roles},
                       "cache": self._agent_cache_metrics(db, pipeline_id)}
+            result["by_execution"] = [{"execution": dict(zip(("provider", "model", "effort", "browser_backend"), key)),
+                                        **self._agent_usage_totals(group)} for key, group in execution_groups.items()]
             from .timing import summarize_timings
             timing_rows = db.execute("SELECT e.payload FROM agent_runtime_events e JOIN agent_workers w ON w.id=e.worker_id "
                                      "WHERE e.event_type='timing_summary' " + ("AND w.pipeline_id=? " if pipeline_id else "")
@@ -4381,7 +4425,7 @@ class Store:
         worker = db.execute("SELECT session_id FROM agent_workers WHERE id=?", (worker_id,)).fetchone()
         valid = []
         for row in rows:
-            if (row["tool_name"] == "cua_repl.js" and row["success"] == 1
+            if ((row["tool_name"] == "cua_repl.js" or row["tool_name"].startswith("playwright.")) and row["success"] == 1
                     and row["session_id"] and row["session_id"] == worker["session_id"]):
                 valid.append(row["id"])
         return valid
@@ -4855,6 +4899,11 @@ class Store:
                         or action == "finish_submission" and payload.get("status") not in {"submitted", "uncertain"}):
                     raise Conflict("This approved recovery is read-only reconciliation; no tab retry or application replay is authorized.")
             if action == "get_browser_guidance":
+                if self._agent_decode(worker["context"], {}).get("execution", {}).get("browser_backend") == "playwright":
+                    path = self.root / "prompts/browser_playwright.md"
+                    content = path.read_text(encoding="utf-8")
+                    return {"document": payload.get("document"), "backend": "playwright", "source_path": str(path),
+                            "sha256": digest(content), "content": content}
                 document = payload.get("document")
                 if document not in {"skill", "guidance", "confirmations", "api"}:
                     raise ValueError("Choose an installed browser-guidance document.")
@@ -5135,8 +5184,8 @@ class Store:
         }
         company_auth = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key=? AND control_type='company_auth'",
                                   ("company:" + str(pipeline["company_id"]),)).fetchone()
-        connector_circuit = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key='connector:cua_repl' "
-                                       "AND control_type='connector_circuit'").fetchone()
+        connector_circuit = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key=? "
+                                       "AND control_type='connector_circuit'", (self._agent_connector_scope(worker),)).fetchone()
         company_control = self._agent_browser_control_view(company_auth, "company_auth")
         circuit_control = self._agent_browser_control_view(connector_circuit, "connector_circuit")
         signin = db.execute("SELECT value FROM meta WHERE key=?", ("agent_signin_automation:" + worker["pipeline_id"],)).fetchone() if worker["role"] == "submission" else None
@@ -5204,6 +5253,17 @@ class Store:
         item = payload.get("transport_event", payload).get("item", {})
         result = item.get("result") or {}
         raw = result.get("_meta", {}).get("browser_use", {}).get("url")
+        if item.get("server") == "playwright":
+            # Only tool-generated page metadata, before any site snapshot or
+            # code block; never infer the application URL from arbitrary text.
+            for block in result.get("content", []):
+                text = block.get("text", "") if isinstance(block, dict) else ""
+                page = text.split("### Page\n", 1)[-1] if "### Page\n" in text else ""
+                page = page.split("### Snapshot", 1)[0].split("```", 1)[0]
+                match = re.search(r"(?m)^- Page URL: (https://[^\s]+)$", page)
+                if match:
+                    raw = match.group(1)
+                    break
         if payload.get("authentication_redacted"):
             raw = payload.get("observed_application_url")
         if not isinstance(raw, str):
@@ -5219,7 +5279,7 @@ class Store:
         if not worker["session_id"]:
             return None
         row = db.execute("SELECT id,session_id,payload FROM agent_runtime_events WHERE worker_id=? AND session_id=? "
-                         "AND tool_name='cua_repl.js' AND success=? ORDER BY rowid DESC LIMIT 1",
+                         "AND (tool_name='cua_repl.js' OR tool_name LIKE 'playwright.%') AND success=? ORDER BY rowid DESC LIMIT 1",
                          (worker["id"], worker["session_id"], int(bool(success)))).fetchone()
         if not row:
             return None
@@ -5229,7 +5289,7 @@ class Store:
         transport = payload.get("transport_event")
         item = transport.get("item") if isinstance(transport, dict) else None
         if (not isinstance(item, dict) or item.get("type") != "mcp_tool_call"
-                or item.get("server") != "cua_repl" or item.get("tool") != "js"):
+                or not (item.get("server") == "cua_repl" and item.get("tool") == "js" or item.get("server") == "playwright")):
             return None
         return {"event_id": row["id"], "session_id": row["session_id"],
                 "application_url": self._agent_observed_application_url(db, worker, payload)}
@@ -5327,12 +5387,16 @@ class Store:
             self._agent_refresh_pipeline(db, owner["pipeline_id"])
             return {"connector_state": "closed", "job_state": "waiting_approval", "job_retry_authorized": False}
 
+    def _agent_connector_scope(self, worker):
+        execution = self._agent_decode(worker["context"], {}).get("execution", {})
+        return "browser:playwright:" + worker["id"] if execution.get("browser_backend") == "playwright" else "connector:cua_repl"
+
     def _agent_browser_control_action(self, db, worker, payload):
         operation = payload.get("operation")
         if operation not in {"acquire_auth", "complete_auth", "open_circuit", "complete_recovery"}:
             raise ValueError("Unsupported browser control operation.")
         auth = operation in {"acquire_auth", "complete_auth"}
-        scope = "company:" + worker["company_id"] if auth else "connector:cua_repl"
+        scope = "company:" + worker["company_id"] if auth else self._agent_connector_scope(worker)
         kind = "company_auth" if auth else "connector_circuit"
         prior = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key=?", (scope,)).fetchone()
         reason = str(payload.get("reason") or "")[:4000]
@@ -5956,7 +6020,7 @@ class Store:
                    (state, json.dumps(result, ensure_ascii=False), now, now, worker["id"]))
         if decision in {"approve", "discard"}:
             cache_snapshot = self._agent_evaluation_cache_snapshot(
-                db, worker["pipeline_id"], worker["job_id"], worker["jd_version"])
+                db, worker["pipeline_id"], worker["job_id"], worker["jd_version"], self._agent_decode(worker["context"], {}).get("execution"))
             if cache_snapshot:
                 cache_payload = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 # Cache only compact, complete agent findings. Oversized or
@@ -6112,7 +6176,7 @@ class Store:
 
     def _agent_begin_final_action(self, db, worker, payload):
         if db.execute("SELECT 1 FROM agent_browser_controls WHERE state='open' AND scope_key IN (?,?)",
-                      ("connector:cua_repl", "company:" + worker["company_id"])).fetchone():
+                      (self._agent_connector_scope(worker), "company:" + worker["company_id"])).fetchone():
             raise Conflict("Authentication or connector recovery is still pending; final action cannot start.")
         if worker["role"] != "submission" or not worker["job_id"]:
             raise Conflict("Only a scoped submission worker can begin its final application action.")
@@ -6284,6 +6348,8 @@ class Store:
                         provider_error, json.dumps(persisted_result, ensure_ascii=False), now, state, now, worker_id))
             self.event(db, "agent.worker_turn_finished", {"worker_id": worker_id, "disposition": disposition,
                        "state": state, "error": error}, worker["job_id"], "agent_scheduler")
+            db.execute("UPDATE agent_execution_runs SET finished_at=?,state=? WHERE worker_id=? AND generation=?",
+                       (now, state, worker_id, worker["launch_generation"]))
             self._agent_wake_orphaned_auth_waiters(db)
             self._agent_refresh_pipeline(db, worker["pipeline_id"])
             return {"worker_id": worker_id, "state": state, "disposition": disposition,

@@ -539,6 +539,9 @@ function renderWorker(worker, pipeline) {
   card.append(withRenderKey(element('p', workerActivityText(worker, pipeline), 'worker-activity'), 'activity'));
   if (worker.job_title || worker.job_id) card.append(element('p', worker.job_title || ('Job ' + worker.job_id), 'sub'));
   if (worker.resume_mode) card.append(element('p', 'Resume mode: ' + humanize(worker.resume_mode), 'sub'));
+  const execution = worker.context?.execution;
+  if (execution) card.append(element('p', `${execution.provider} · ${execution.model} · ${execution.effort} · ${execution.browser_backend}`, 'sub'));
+  if (worker.context?.execution_change_deferred) card.append(element('p', 'Model change waits for reconciliation of the possibly sent application.', 'hint'));
   if (worker.updated_at) card.append(element('p', 'Updated ' + dateText(worker.updated_at), 'sub'));
   if (worker.id) card.append(element('p', 'Worker ID ' + worker.id, 'sub'));
   if (worker.session_id) {
@@ -1779,6 +1782,14 @@ function renderEfficiency() {
     nodes.push(card);
   });
   else nodes.push(withRenderKey(element('p', 'Per-role usage is unavailable in this report.', 'sub'), 'roles-unavailable'));
+  (report.by_execution || []).forEach((values, index) => {
+    const choice = values.execution || {};
+    const label = choice.provider ? `${choice.provider} · ${choice.model} · ${choice.effort}` : 'Historical usage · execution choice not recorded';
+    const card = withRenderKey(element('div', undefined, 'efficiency-role'), 'execution:' + index);
+    card.append(element('strong', label), element('span', 'Turns ' + formatMetric(values.turns)
+      + ' · Input ' + usageMetricText(values, 'input_tokens') + ' · Output ' + usageMetricText(values, 'output_tokens')));
+    nodes.push(card);
+  });
   nodes.push(withRenderKey(element('p', 'Inbox waits are measured separately. Parallel worker times overlap; cached input is part of input and reasoning is part of output.', 'sub'), 'measurement-note'));
   reconcileChildren(root, nodes);
 }
@@ -1893,7 +1904,7 @@ $('outcome-form').addEventListener('submit', async event => {
   } catch (error) { setStatus(error.message); }
 });
 $('close-detail').addEventListener('click', () => { $('detail').classList.add('hidden'); currentJobDetail = null; });
-const workspaceViews = { pipelines: 'Pipelines', jobs: 'Applications', inbox: 'Agent inbox', technologies: 'Technology history', companies: 'Saved companies' };
+const workspaceViews = { pipelines: 'Pipelines', jobs: 'Applications', inbox: 'Agent inbox', technologies: 'Technology history', companies: 'Saved companies', settings: 'Settings' };
 function navigateWorkspace(view, { updateHistory = true, focus = false } = {}) {
   if (!Object.hasOwn(workspaceViews, view)) view = 'pipelines';
   currentView = view;
@@ -1908,6 +1919,7 @@ function navigateWorkspace(view, { updateHistory = true, focus = false } = {}) {
   $('detail').classList.toggle('hidden', view !== 'jobs' || !currentJobDetail);
   if (updateHistory && window.location.hash !== '#' + view) window.history.pushState({ view }, '', '#' + view);
   if (focus) $('workspace-main').focus({ preventScroll: true });
+  if (view === 'settings') loadWorkerSettings();
   window.scrollTo({ top: 0, behavior: 'instant' });
   refreshDashboard().catch(error => setStatus(error.message));
 }
@@ -1971,6 +1983,7 @@ async function bootstrap() {
   }
   await refreshBrowserStatus();
   await refreshDashboard();
+  if (currentView === 'settings') await loadWorkerSettings();
 }
 bootstrap().catch(error => {
   $('integration-notice').textContent = 'The local pipeline service could not be reached.';
