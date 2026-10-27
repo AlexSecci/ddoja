@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Pipeline Practice Form</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><main><p class="eyebrow">Local integration test · Fictional data only</p><h1>Pipeline Practice Form</h1>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#0c0d14"><title>Pipeline Practice Form</title><link rel="icon" href="/static/orbit-mark.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="/static/theme.css"></head>
+<body class="practice-page"><main><a class="practice-back" href="/">← Back to workspace</a><p class="eyebrow">Local integration test · Fictional data only</p><h1>Pipeline Practice Form</h1>
 <p class="notice">This form records a local test receipt. It does not send an application to an employer or accept any legal agreement.</p>
 <form id="practice-form" class="record">
 <p><label for="practice-name">Applicant name</label><br><input id="practice-name" name="name" required autocomplete="off"></p>
 <p><label for="practice-email">Email</label><br><input id="practice-email" name="email" type="email" required autocomplete="off"></p>
 <p><label for="practice-sponsorship">Requires US sponsorship?</label><br><select id="practice-sponsorship" name="sponsorship" required><option value="">Choose</option><option value="yes">Yes</option><option value="no">No</option></select></p>
 <p><label for="practice-resume">Test resume file</label><br><input id="practice-resume" name="resume" type="file" accept=".txt,.md" required></p>
-<p><button type="submit">Save local test receipt</button></p>
+<p><button type="submit" class="primary-button">Save local test receipt</button></p>
 </form>
 <section id="practice-confirmation" class="hidden"><h2>Local practice submission received</h2><p id="receipt-id"></p><pre id="receipt-detail"></pre></section>
 <p id="status" role="status" aria-live="polite"></p>

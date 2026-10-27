@@ -4,19 +4,20 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import time
 import tomllib
 import uuid
 
+from .cli_paths import CODEX_CLI_NOT_FOUND, codex_invocation_env, resolve_codex_cli
+
 
 class CodexRunner:
     def __init__(self, root, codex_bin=None):
         self.root = Path(root).resolve()
-        self.codex = codex_bin or shutil.which("codex")
+        self.codex = resolve_codex_cli(codex_bin)
         if not self.codex:
-            raise RuntimeError("Codex CLI executable is not available on PATH.")
+            raise RuntimeError(CODEX_CLI_NOT_FOUND)
         self.config = json.loads((self.root / "config" / "workers.json").read_text(encoding="utf-8"))
         if self.config.get("authentication") != "chatgpt":
             raise RuntimeError("This runner requires the user's existing ChatGPT subscription.")
@@ -49,7 +50,7 @@ class CodexRunner:
             if "." in server:
                 raise RuntimeError("Per-run MCP keys containing dots require a supported configuration adapter.")
             args.extend(["-c", f"mcp_servers.{server}.enabled=false"])
-        env = os.environ.copy()
+        env = codex_invocation_env(self.root, run_id, os.environ.copy())
         for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"):
             env.pop(key, None)
         check = subprocess.run([self.codex, "login", "status"], env=env, capture_output=True,

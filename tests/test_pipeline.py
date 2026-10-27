@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,6 +22,16 @@ def setup_store(tmp_path):
     store = Store(tmp_path)
     store.company("example", "Example", "https://example.test/careers", enabled=True)
     return store
+
+
+def browser_inventory_report(browser_names):
+    normalized = {"browser_names": sorted(set(browser_names)), "tab_count": 0}
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return {"mcp_calls": [{"server": "cua_repl", "tool": "js", "status": "completed"}],
+            "unapproved_action_events": [],
+            "browser_inventory_observation": {"operation": "cua.getState",
+                "source": "successful_cua_repl_js_result", **normalized,
+                "result_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}}
 
 
 def proposal(**changes):
@@ -263,22 +274,37 @@ def test_browser_visibility_does_not_imply_verified_submission(tmp_path):
     folder = tmp_path / "data" / "integration"
     folder.mkdir(parents=True)
     (folder / "browser.report.json").write_text(json.dumps({"final": {"browser_names": ["Chrome"]}}))
-    assert browser_status(tmp_path)["verified"] is False
+    unverified = browser_status(tmp_path)
+    assert unverified["verified"] is False
+    assert unverified["inventory_available"] is False
+    assert unverified["state"] == "browser_inventory_unverified"
+    (folder / "browser.report.json").write_text(json.dumps(browser_inventory_report(["Chrome"])))
     (folder / "practice-complete.report.json").write_text(json.dumps({
         "final": {"status": "failed", "detail": "Blocked"},
         "mcp_calls": [{"failure_detail": "A saved user permission setting blocks this action."}]}))
     status = browser_status(tmp_path)
-    assert status["inventory_available"] is True
+    assert status["inventory_available"] is True and status["inventory_verified"] is True
     assert status["state"] == "site_permission_required" and status["verified"] is False
-    (folder / "practice-complete.report.json").write_text(json.dumps({
-        "final": {"status": "confirmed", "receipt_id": "abc123", "page_url": "http://127.0.0.1:8765/practice"}}))
+    receipt_id = "c" * 32
+    final = {"status": "confirmed", "receipt_id": receipt_id, "page_url": "http://127.0.0.1:8765/practice"}
+    (folder / "practice-complete.report.json").write_text(json.dumps({"final": final}))
     assert browser_status(tmp_path)["verified"] is False  # Worker prose alone is insufficient evidence.
     receipts = tmp_path / "data" / "practice-receipts"
     receipts.mkdir()
-    (receipts / "abc123.json").write_text('{"test_only":true}')
+    (receipts / f"{receipt_id}.json").write_text('{"test_only":true}')
     assert browser_status(tmp_path)["verified"] is False
     fixture = (Path(__file__).parent / "fixtures" / "fictional-test-resume.txt").read_text(encoding="utf-8")
-    (receipts / "abc123.json").write_text(json.dumps({"receipt_id": "abc123", "test_only": True,
+    (receipts / f"{receipt_id}.json").write_text(json.dumps({"receipt_id": receipt_id, "test_only": True,
         "name": "Test Candidate", "email": "candidate@example.test", "sponsorship": "yes",
         "filename": "fictional-test-resume.txt", "file_sha256": digest(fixture)}))
+    assert browser_status(tmp_path)["verified"] is False  # A local HTTP receipt artifact is not CUA evidence.
+    from tools.integration_probe import _practice_receipt_observation
+    visible = ("http://127.0.0.1:8765/practice\nLocal practice submission received\n" + receipt_id
+               + "\nfictional-test-resume.txt")
+    events = [{"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "cua_repl",
+               "tool": "js", "status": "completed", "result": {"content": [{"type": "text", "text": visible}]}}}]
+    (folder / "practice-complete.report.json").write_text(json.dumps({"final": final,
+        "mcp_calls": [{"server": "cua_repl", "tool": "js", "status": "completed"}],
+        "unapproved_action_events": [],
+        "browser_practice_observation": _practice_receipt_observation(events, final)}))
     assert browser_status(tmp_path)["verified"] is True

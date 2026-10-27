@@ -70,13 +70,21 @@ def normalize(adapter, post, source):
             "country": country, "employment": employment, "arrangement": arrangement, "source": source}
 
 
-def scan_company(store, company_id, *, client=None, page_size=100, max_pages=50):
+def scan_company(store, company_id, *, client=None, page_size=100, max_pages=50, pipeline_id=None):
     scan_id, start = uuid.uuid4().hex, timestamp()
     with store.connect(write=True) as db:
         company = db.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
         source = db.execute("SELECT * FROM company_sources WHERE company_id=?", (company_id,)).fetchone()
         if not company or not company["enabled"] or not source:
             raise Conflict("Enable the company and configure its verified feed source before scanning.")
+        if company_id == "tesla":
+            raise Conflict("Tesla is excluded from the pilot.")
+        if pipeline_id:
+            pipeline = db.execute("SELECT company_id,status,stop_requested FROM pipelines WHERE id=?", (pipeline_id,)).fetchone()
+            if not pipeline or pipeline["company_id"] != company_id:
+                raise Conflict("Pipeline does not belong to this company.")
+            if pipeline["status"] not in {"running", "queued"} or pipeline["stop_requested"]:
+                raise Conflict("Pipeline is stopped or no longer active.")
         if store.paused():
             raise Conflict("Queue is paused.")
         db.execute("UPDATE scans SET status='incomplete',finished_at=? WHERE status='running' AND lease_until<?", (start, time.time()))
@@ -91,12 +99,14 @@ def scan_company(store, company_id, *, client=None, page_size=100, max_pages=50)
             f"https://{'api.eu.lever.co' if adapter == 'lever_eu' else 'api.lever.co'}/v0/postings/{token}")
     owned_client = client is None
     client = client or httpx.Client(timeout=20, follow_redirects=False, headers={"Accept": "application/json"})
-    counts = {"new": 0, "changed": 0, "unchanged": 0, "observed_posts": 0, "pages": 0}
+    counts = {"new": 0, "changed": 0, "unchanged": 0, "observed_posts": 0, "pages": 0,
+              "selected_posts": 0, "excluded_posts": 0}
     status, detail, seen = "incomplete", "Page cap reached; coverage is incomplete.", set()
     records, deadline = [], time.monotonic() + 120
     try:
         for page in range(1 if adapter == "greenhouse" else max_pages):
-            if time.monotonic() > deadline or store.paused():
+            stopped = store.paused() or (pipeline_id and store.pipeline_stop_requested(pipeline_id))
+            if time.monotonic() > deadline or stopped:
                 detail = "Scan paused or time limit reached; coverage is incomplete."
                 break
             params = {"content": "true"} if adapter == "greenhouse" else {"mode": "json", "skip": page * page_size, "limit": page_size}
@@ -131,9 +141,22 @@ def scan_company(store, company_id, *, client=None, page_size=100, max_pages=50)
                 break
         # Commit only after validating every captured record. A partial scan can still
         # add observed posts, but never implies that missing jobs have closed.
+        filters = store.get_pipeline(pipeline_id)["filters"] if pipeline_id else None
         for record in records:
             result = store.discover(company_id, record)
             counts["new" if result["created"] else "changed" if result["changed"] else "unchanged"] += 1
+            if pipeline_id:
+                selected, excluded_reason = True, ""
+                title_filter = filters["title_contains"].casefold()
+                location_filter = filters["location_contains"].casefold()
+                if title_filter and title_filter not in record["title"].casefold():
+                    selected, excluded_reason = False, f"Title does not match: {filters['title_contains']}"
+                location = record["location"].strip()
+                if selected and location_filter and location.casefold() not in {"unknown", "not specified", ""} \
+                        and location_filter not in location.casefold():
+                    selected, excluded_reason = False, f"Location does not match: {filters['location_contains']}"
+                store.add_pipeline_job(pipeline_id, result["id"], selected=selected, excluded_reason=excluded_reason)
+                counts["selected_posts" if selected else "excluded_posts"] += 1
     except Exception as error:
         status, detail = "failed", str(error)
     finally:

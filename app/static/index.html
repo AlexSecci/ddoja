@@ -1,19 +1,213 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Application Pipeline</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><main>
-<header><div><p class="eyebrow">the applicant · Local workspace</p><h1>Application Pipeline</h1></div><button id="pause">Pause queue</button></header>
-<p id="integration-notice" class="notice">Foundation release · Loading integration status · Live submission disabled</p>
-<section id="summary" class="cards" aria-label="Queue summary"></section>
-<form id="batch-form" class="toolbar"><label for="batch-limit">Offline tasks per run</label><input id="batch-limit" type="number" min="1" max="200" value="20"><button type="submit">Run queued offline work</button><span class="hint">Evaluation, drafts and PDF review; uses your subscription.</span></form>
-<nav aria-label="Views"><button data-view="jobs" class="active">Applications</button><button data-view="questions">Questions</button><button data-view="technologies">Technology history</button><button data-view="companies">Companies</button></nav>
-<section id="jobs" class="view"><div class="toolbar"><input id="search" placeholder="Search title, requisition or company" aria-label="Search applications"><button id="evaluate">Run next evaluation</button><button id="materials">Draft next materials</button><button id="review">Render and review next draft</button><button id="refresh">Refresh</button></div>
-<p class="hint">Prior submissions are imported with supporting evidence. Workers only claim jobs from enabled companies. Drafts must pass PDF text checks, source review and visual review before becoming ready for submission. Live submission remains disabled.</p>
-<div class="table-wrap"><table><thead><tr><th>Role</th><th>Location</th><th>Stage</th><th>Progress</th><th></th></tr></thead><tbody id="job-rows"></tbody></table></div></section>
-<section id="questions" class="view hidden"><h2>Questions awaiting your answer</h2><p>One answer is reused by every affected application.</p><div id="question-list"></div></section>
-<section id="technologies" class="view hidden"><h2>Confirmed technology history</h2><p>Knowledge and experience depth are stored separately. A “Yes” does not imply production experience.</p><div id="technology-list"></div></section>
-<section id="companies" class="view hidden"><h2>Company sources</h2><p>Published Greenhouse and Lever feeds can be scanned without opening application forms. Verify the board token on the employer’s own careers site before adding it. Tesla remains disabled for the pilot.</p>
-<form id="company-form" class="record question-form"><input id="company-id" aria-label="Company identifier" placeholder="Company identifier" required pattern="[a-z0-9-]+"><input id="company-name" aria-label="Company name" placeholder="Company name" required><input id="company-url" type="url" aria-label="Careers URL" placeholder="Careers URL" required><select id="company-adapter" aria-label="Feed type"><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option><option value="lever_eu">Lever EU</option></select><input id="company-token" aria-label="Verified board token" placeholder="Verified board token" required pattern="[A-Za-z0-9_-]{1,128}"><button type="submit">Save enabled company</button></form><p class="hint">Saving enables evaluation and material drafting. It does not scan automatically or enable submission.</p><div id="company-list"></div></section>
-<section id="detail" class="hidden"><div class="toolbar"><h2 id="detail-title">Application details</h2><button id="close-detail">Close details</button></div><div id="detail-summary" class="record"></div><div id="detail-packages"></div><details><summary>Stored record and evidence</summary><pre id="detail-text"></pre></details></section>
-<p id="status" role="status" aria-live="polite"></p>
-</main><script src="/static/app.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0c0d14">
+  <title>Application Pipeline</title>
+  <link rel="icon" href="/static/orbit-mark.svg" type="image/svg+xml">
+  <link rel="preload" href="/static/space-grotesk.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" href="/static/dm-sans.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/theme.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace-main">Skip to workspace</a>
+  <aside class="sidebar" aria-label="Application workspace">
+    <a class="brand" href="/" aria-label="Application Pipeline home">
+      <span class="brand-mark" aria-hidden="true">✳</span>
+      <span>APPLICATION<span class="brand-second">PIPELINE<span class="brand-period">.</span></span></span>
+    </a>
+    <p class="sidebar-label">Your command center</p>
+    <nav aria-label="Workspace views" class="primary-nav">
+      <button type="button" data-view="pipelines" class="active" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Pipelines</span><span class="nav-index">01</span></button>
+      <button type="button" data-view="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V4h8v3M3 12h18M10 12v3h4v-3"/></svg><span>Applications</span><span class="nav-index">02</span></button>
+      <button type="button" data-view="inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM4 13h5l2 3h2l2-3h5M9 8h6"/></svg><span>Agent inbox</span><span id="inbox-nav-count" class="nav-index">03</span></button>
+      <button type="button" data-view="technologies"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 6-5 6 5 6m8-12 5 6-5 6m-3-15-2 18"/></svg><span>Technology history</span><span class="nav-index">04</span></button>
+      <button type="button" data-view="companies"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V3h11v18m0-12h5v12M8 7h3M8 11h3M8 15h3M2 21h20"/></svg><span>Saved companies</span><span class="nav-index">05</span></button>
+    </nav>
+    <div class="sidebar-callout"><span class="callout-orbit" aria-hidden="true">↗</span><strong>Built for your<br>next chapter.</strong><p>One company at a time.<br>Every opportunity considered.</p><button id="sidebar-launch" type="button" class="primary-button">New pipeline <span aria-hidden="true">+</span></button></div>
+    <div class="sidebar-bottom">
+      <button id="connection-toggle" type="button" class="connection-toggle"><span class="connection-icon" aria-hidden="true">⌁</span><span>Connection diagnostics<small id="connection-label">Status loading</small></span><span aria-hidden="true">↗</span></button>
+      <div class="profile-stamp"><span class="avatar">AS</span><span><strong>the applicant</strong><small>Personal workspace</small></span><span class="profile-lock" aria-label="Local workspace">⌂</span></div>
+    </div>
+  </aside>
+  <main id="workspace-main" tabindex="-1">
+    <header class="app-header">
+      <div class="breadcrumb">WORKSPACE <span aria-hidden="true">/</span> <span id="view-label">Pipelines</span></div>
+      <div class="topbar-actions"><span id="service-state" class="service-state"><span class="dot" aria-hidden="true"></span><span id="service-label">Connecting</span></span><span class="local-badge">Local &amp; private</span><button id="header-launch" type="button" class="quiet-button">New pipeline <span aria-hidden="true">↗</span></button></div>
+    </header>
+    <p id="integration-notice" class="sr-only" role="status">Loading pipeline capabilities…</p>
+    <div id="workspace-alert" class="workspace-alert hidden" role="status"><span class="alert-symbol" aria-hidden="true">Ⅱ</span><div><strong>Agent launches are paused</strong><p>Check your account limits, then confirm the reset to continue saved work.</p></div><button id="review-capacity" type="button" class="small-button">Review capacity <span aria-hidden="true">↗</span></button></div>
+
+    <section id="pipelines" class="view">
+      <section class="workspace-hero" aria-labelledby="overview-title">
+        <div class="hero-copy"><p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> Intent meets execution</p><h1 id="overview-title">Opportunity,<br><em>orchestrated.</em></h1><p>Your ambition. A clear path forward.</p><div class="hero-actions"><button id="hero-launch" type="button" class="primary-button">Launch a pipeline <span aria-hidden="true">↗</span></button><button id="hero-inbox" type="button" class="text-button">Review agent inbox <span aria-hidden="true">→</span></button></div></div>
+        <div class="orbital-scene" aria-hidden="true"><div class="orbit-grid"></div><div class="orbit-ring ring-one"></div><div class="orbit-ring ring-two"></div><div class="orbit-ring ring-three"></div><div class="orbit-core">✳</div><span class="orbit-node node-one"></span><span class="orbit-node node-two"></span><span class="orbit-node node-three"></span><span class="orbit-tag tag-one">01 / DISCOVER</span><span class="orbit-tag tag-two">02 / EVALUATE</span><span class="orbit-tag tag-three">03 / APPLY</span><span class="orbit-caption">INDEPENDENT AGENTS. ONE DIRECTION.</span></div>
+      </section>
+      <section id="workspace-metrics" class="workspace-metrics" aria-label="Saved pipeline overview">
+        <div class="overview-metric"><span class="metric-overline">01 / PORTFOLIO</span><strong id="overview-companies">—</strong><span>Company runs</span><span class="metric-glyph" aria-hidden="true">↗</span></div>
+        <div class="overview-metric"><span class="metric-overline">02 / MOMENTUM</span><strong id="overview-active">—</strong><span>Running or queued agents</span><span class="metric-glyph" aria-hidden="true">⌁</span></div>
+        <div class="overview-metric"><span class="metric-overline">03 / DELIVERED</span><strong id="overview-submitted">—</strong><span>Verified submissions in runs</span><span class="metric-glyph" aria-hidden="true">✓</span></div>
+        <div class="overview-metric"><span class="metric-overline">04 / YOUR MOVE</span><strong id="overview-checkpoints">—</strong><span>Jobs at a checkpoint</span><span class="metric-glyph" aria-hidden="true">✳</span></div>
+      </section>
+      <div class="workspace-tools"><details id="launch-panel" class="launch-panel">
+        <summary><span class="launch-plus" aria-hidden="true">+</span><span><strong>Start a pipeline</strong><small>A company, a careers page, a new possibility.</small></span><span class="launch-prompt">Configure launch <span aria-hidden="true">↗</span></span></summary>
+      <form id="pipeline-form" class="panel setup-panel">
+        <div class="setup-heading"><p class="eyebrow">Launch configuration</p><h2>Pick your next destination.</h2><p class="intro">Start an independent company run. Agents explore its careers site and evaluate the full descriptions against your confirmed experience.</p></div>
+        <div class="form-grid">
+          <label class="field">
+            <span>Company name</span>
+            <input id="pipeline-company-name" name="company_name" autocomplete="organization" required placeholder="Company name">
+          </label>
+          <label class="field">
+            <span>Careers page URL</span>
+            <input id="pipeline-careers-url" name="careers_url" type="url" inputmode="url" required placeholder="https://company.com/careers">
+          </label>
+          <label class="field">
+            <span>Role focus <span class="optional">optional</span></span>
+            <input id="pipeline-title-filter" name="title_filter" placeholder="For example, platform, data, or GPU/HPC">
+            <small class="field-note">Leave blank for CS-related software/developer, systems/platform, GPU/HPC, backend/frontend/full-stack, data, software-automation, and similar duties; exact titles are not required.</small>
+          </label>
+          <label class="field">
+            <span>Location <span class="optional">optional</span></span>
+            <input id="pipeline-location-filter" name="location_filter" placeholder="For example, Austin, Texas">
+          </label>
+        </div>
+
+        <fieldset class="fixed-filters">
+          <legend>Required filters applied to every pipeline</legend>
+          <span class="filter-chip"><span aria-hidden="true">✓</span> Computer-science-related jobs</span>
+          <span class="filter-chip"><span aria-hidden="true">✓</span> United States</span>
+          <span class="filter-chip"><span aria-hidden="true">✓</span> Full-time</span>
+          <span class="filter-chip"><span aria-hidden="true">✓</span> On-site or hybrid</span>
+        </fieldset>
+
+        <div class="form-footer">
+          <p class="hint">Fixed scope: computer-science-related work in the United States, full-time, on-site or hybrid. A blank role focus covers varied CS titles and duties; a focus narrows that search. The first actual application is held for your review before the final send; action-specific approvals still apply. <span id="upload-policy-summary"></span></p>
+          <button id="pipeline-submit" type="submit" class="primary-button" disabled>Start pipeline</button>
+        </div>
+      </form>
+      </details>
+      <details id="capacity-panel" class="agent-console"><summary><span class="console-icon" aria-hidden="true">◈</span><span>Execution &amp; capacity</span><small>Worker limits, quota &amp; measured usage</small></summary>
+      <section class="agent-controls panel" aria-labelledby="agent-controls-heading">
+        <div class="section-heading">
+          <div><h2 id="agent-controls-heading">Agent capacity and account usage</h2><p id="agent-limits" class="hint">Loading worker limits…</p></div>
+          <div class="quota-control">
+            <span id="quota-status" class="quota-status" role="status">Loading quota state…</span>
+            <label class="quota-confirm"><input id="quota-reset-confirm" type="checkbox"> I confirmed my account quota has reset</label>
+            <button id="quota-resume" type="button" class="outline-button" disabled>Resume after quota reset</button>
+          </div>
+        </div>
+        <p class="hint">Tasks prefer their saved Codex session. A replacement session is offered only after the runtime reports that the saved session is unavailable. Quota resume never retries an uncertain final send.</p>
+        <details id="efficiency-details" class="efficiency-details">
+          <summary>Usage, execution-host readiness, and measured efficiency</summary>
+          <p id="host-readiness" class="hint">Execution-host and authentication readiness are unavailable until the service reports them.</p>
+          <div id="efficiency-metrics" class="efficiency-metrics" aria-live="polite">
+            <p class="sub">Usage metrics have not been loaded.</p>
+          </div>
+          <button id="efficiency-refresh" type="button" class="small-button">Refresh usage metrics</button>
+        </details>
+      </section>
+      </details>
+      </div>
+
+      <div class="section-heading fleet-heading">
+        <div>
+          <p class="eyebrow">The big picture</p><h2>Your pipelines<span class="heading-dot">.</span></h2>
+          <p class="hint">Every company. Every stage. In one place.</p>
+        </div>
+        <div class="refresh-control"><button id="hidden-campaigns-toggle" type="button" class="quiet-button" aria-pressed="false">Show hidden campaigns (0)</button><span id="pipeline-updated" class="hint">Not refreshed yet</span><button id="pipeline-refresh" type="button" class="quiet-button" disabled>Refresh</button></div>
+      </div>
+      <div id="pipeline-list" class="pipeline-list" aria-live="polite">
+        <p class="empty-state">Loading pipelines…</p>
+      </div>
+      <p class="completion-note">A pipeline is complete only after its discovery agent reports full coverage and every selected job has a terminal submitted or discarded result. Questions, quota pauses, errors, and uncertain sends do not count as complete. Recruiter outcomes are tracked separately.</p>
+    </section>
+
+    <section id="jobs" class="view hidden">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Saved records</p>
+          <h2>Applications</h2>
+          <p class="intro">The paper trail behind your next chapter.</p>
+        </div>
+      </div>
+      <section id="summary" class="summary-cards" aria-label="Queue summary"></section>
+      <div class="toolbar job-toolbar">
+        <input id="search" placeholder="Search title, requisition or company" aria-label="Search applications">
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+      <p class="hint">This view includes historical records from all companies. A prepared or reviewed package does not mean an application was sent.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Role</th><th>Location</th><th>Stage</th><th>Progress</th><th></th></tr></thead>
+          <tbody id="job-rows"></tbody>
+        </table>
+      </div>
+      <div class="table-pagination" aria-label="Application record pages"><p id="jobs-result-count" role="status">Loading records…</p><div><button id="jobs-previous" type="button" class="small-button" disabled>← Previous</button><span id="jobs-page-number">Page 1</span><button id="jobs-next" type="button" class="small-button" disabled>Next →</button></div></div>
+    </section>
+
+    <section id="inbox" class="view hidden">
+      <div class="page-heading">
+        <div><p class="eyebrow">Human judgment, right on cue</p><h2>Your move<span class="heading-dot">.</span></h2></div>
+      </div>
+      <p class="intro">Questions wait only on the affected job. Review the agent’s context before responding. First-application review and action approvals are separate decisions tied to that job’s current checkpoint.</p>
+      <div class="section-heading"><div><h3>Open checkpoints</h3><p id="inbox-updated" class="hint">Not refreshed yet</p></div><button id="inbox-refresh" type="button" class="quiet-button" disabled>Refresh inbox</button></div>
+      <div id="approval-batches" class="approval-batches" aria-label="Batch approvals"></div>
+      <div id="agent-inbox-list" class="agent-inbox-list" aria-live="polite"><p class="empty-state">Loading agent checkpoints…</p></div>
+      <details id="legacy-question-history" class="legacy-question-history">
+        <summary>Legacy questions from the previous workflow</summary>
+        <p class="hint">These records remain readable. Agent adoption does not inherit old scripted decisions or silently answer old questions.</p>
+        <div id="legacy-question-list"></div>
+      </details>
+      <details id="resolved-agent-history" class="resolved-agent-history">
+        <summary>Resolved agent checkpoints</summary>
+        <div id="resolved-agent-list"></div>
+      </details>
+    </section>
+
+    <section id="technologies" class="view hidden">
+      <div class="page-heading">
+        <div><p class="eyebrow">Applicant profile</p><h2>Confirmed technology history</h2></div>
+      </div>
+      <p class="intro">Knowledge and hands-on experience are stored separately. A “Yes” does not imply production experience.</p>
+      <div class="toolbar technology-toolbar"><input id="technology-search" type="search" aria-label="Search technologies" placeholder="Find a technology or experience detail…"><span id="technology-results" class="hint" role="status">Loading saved answers…</span></div>
+      <div id="technology-list"></div>
+    </section>
+
+    <section id="companies" class="view hidden">
+      <div class="page-heading">
+        <div><p class="eyebrow">Historical setup</p><h2>Saved companies</h2></div>
+      </div>
+      <p class="intro">Saved company and application data from the previous workflow remains readable. It is not automatically restarted. Use the explicit adoption action on an eligible legacy pipeline to request a fresh agent evaluation.</p>
+      <div id="company-list"></div>
+    </section>
+
+    <section id="detail" class="detail-panel hidden" aria-labelledby="detail-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">Application record</p><h2 id="detail-title">Application details</h2></div>
+        <button id="close-detail" type="button" class="quiet-button">Close details</button>
+      </div>
+      <div id="detail-summary" class="record"></div>
+      <div id="detail-packages"></div>
+      <section id="outcome-section" class="panel outcome-panel">
+        <div><h3>Record an application outcome</h3><p class="hint">Enter the outcome shown by the employer. Add where you saw it and a short note so the record stays auditable.</p></div>
+        <form id="outcome-form" class="form-grid">
+          <label class="field"><span>Outcome</span><select id="outcome-value" required><option value="pending">Pending recruiter</option><option value="rejected">Rejected</option><option value="accepted">Accepted</option><option value="unknown">Unknown</option></select></label>
+          <label class="field"><span>Source</span><input id="outcome-source" required maxlength="200" placeholder="For example, employer email or account page"></label>
+          <label class="field field-wide"><span>Note</span><textarea id="outcome-note" rows="3" required maxlength="250" placeholder="What did you see? Include a date or useful detail."></textarea></label>
+          <div class="field field-action"><span aria-hidden="true">&nbsp;</span><button id="outcome-submit" type="submit">Save outcome</button></div>
+        </form>
+      </section>
+      <details><summary>Stored record and evidence</summary><pre id="detail-text"></pre></details>
+    </section>
+
+    <div class="status-toast"><p id="status" role="status" aria-live="polite"></p><button id="status-dismiss" type="button" aria-label="Dismiss notification">×</button></div>
+    <details id="connection-diagnostics" class="connection-diagnostics"><summary>Connection diagnostics <span aria-hidden="true">↗</span></summary><section class="browser-check panel" aria-labelledby="browser-check-heading"><div><p class="eyebrow">Local connection</p><h2 id="browser-check-heading">Browser practice check</h2><p class="hint">This fictional check is separate from employer workflows. It does not approve employer actions.</p><p id="browser-check-status" class="browser-check-status" role="status">Local practice status has not loaded.</p></div><form id="browser-check-form" class="browser-check-form"><label class="field"><span>What changed about the browser connection?</span><textarea id="browser-connection-note" rows="2" required minlength="8" maxlength="500" placeholder="For example, I reconnected the browser to this workspace."></textarea></label><button id="browser-check-submit" type="submit" class="outline-button" disabled>Run fictional local check</button></form></section></details>
+    <footer><span><span class="footer-mark" aria-hidden="true">✳</span> APPLICATION PIPELINE <span class="footer-slash">/</span> Your ambition, in motion.</span><span>Evidence before status. Always.</span></footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -69,8 +69,10 @@ class Review(BaseModel):
     claims: list[ClaimReview]
 
 
-def work_once(store: Store, stage: str, codex_bin=None):
-    claim = store.claim(stage, "codex:" + stage, lease_seconds=600 if stage == "review" else 300)
+def work_once(store: Store, stage: str, codex_bin=None, *, pipeline_id=None):
+    owner = "codex:" + stage + (":" + pipeline_id if pipeline_id else "")
+    claim = store.claim(stage, owner, lease_seconds=600 if stage == "review" else 300,
+                        pipeline_id=pipeline_id)
     if not claim:
         return {"status": "no_work"}
     job = store.get_job(claim["job_id"])

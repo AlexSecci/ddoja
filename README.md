@@ -1,68 +1,82 @@
 # Application Pipeline
 
-Persistent local pipeline for the applicant, using the existing Codex/ChatGPT subscription. No API key or separately billed API inference route is enabled.
+Persistent local application tracking and company-by-company job pipelines. The agentic workflow uses the existing Codex/ChatGPT subscription; it does not configure a separate API-key inference service.
 
-## Current release
+## Current status — 2026-10-23
 
-- SQLite job queue, description versions, applicant source snapshots, technology answers, shared questions, atomic task claims, recovery and evidence ledger.
-- 89 prior Tesla applications imported from the saved account snapshot; 56 individual confirmation receipts retained separately. Submission attribution is unknown where it was not established. Tesla is disabled as a pilot source.
-- 100 confirmed knowledge records imported: 84 Yes and 16 No, with context and provenance. Historical pending questions remain in the imported source document; they have not been treated as No.
-- Real subscription tests completed for GPT-6 Luna and GPT-6.1 Sol.
-- Read-only Greenhouse and Lever/Lever EU feed adapters save raw pages, descriptions and complete/incomplete/failed scan coverage. No live employer has been scanned by this release. Missing jobs are not automatically closed.
-- Evaluation, material and review workers use GPT-6.1 Sol high through supported `codex exec` structured output, with read-only filesystem access, API-key fallback disabled and browser plugins disabled for that invocation. Explicit location/employment mismatches are discarded without a model call.
-- PDF generation uses the bundled document runtime, text/page checks and PNG previews. Independent source and visual review gates package readiness. Rejected drafts can be revised; after three failed versions, that job waits for manual review while others can continue.
-- Dashboard controls cover company assignment, scanning, questions, offline batches, job explanations and PDF downloads. On-demand batches advance evaluation, drafting and review; no recurring automation is installed. The visible task limit bounds one run, not the total number of applications.
-- All 38 checks pass. A fictional subscription run resolved missing listing metadata, drafted materials, caught an internal workflow note, revised the draft and reached ready for submission. A separate deliberate unsupported 99% latency claim was rejected. These small checks do not establish a live-employer success rate.
+**UI update, October 24:** the dashboard now uses the dark After Hours design with local fonts, persistent navigation, an orbital overview, clearer stage/status cues, paginated records and searchable technology cards. Editing/polling safeguards remain. The suite passes 220 tests; browser acceptance covers all five views at five screen sizes. See the [design and browser acceptance notes](docs/ui-design.md).
 
-Chrome inventory is verified in this chat and a launched Luna worker. The local browser practice test is blocked by a saved site permission for `127.0.0.1`; navigation, filling and upload are **not yet verified**. Renewed user approval and Full Access did not clear that result. Current user screenshots show Default Browsing set to Always allow with no custom site rows visible; a fresh direct worker check still returned the saved block. No supported user/project browser configuration override was found. The cause remains unresolved; see `browser-permission-diagnostic.md`. Worker-owned tab handoff, interactive approvals, submission receipts and post-confirmation tab closure remain to be verified and connected. **Live submission is disabled**, even for a reviewed package. This release is not a complete application autopilot.
+The efficiency rebuild is installed and the dashboard is running with application queues stopped. It adds compact role contexts and versioned updates, exact browser-JD capture, shared factual questions, safe evaluation/document reuse, company sign-in ownership, shared browser-failure recovery, measured usage and stable dashboard editing. The same saved contexts are 67–72% smaller for evaluation/submission/writing; this is a character measurement, not a subscription savings estimate. The final isolated suite passes 219 tests. All original values across 33 tables match the pre-rebuild backup after activation. See the [complete requirement audit and measured limits](docs/efficiency-implementation.md) and [architecture decisions](docs/efficiency-architecture.md).
 
-The existing background server still runs the older release. A restart was rejected as “blocked by policy.” Updated controls stay disabled until the service is restarted. `restart.ps1` is a manually runnable helper that validates the saved process identity before stopping the dashboard. It is syntax checked and has not been executed. A visual check of the updated dashboard remains pending restart and browser access.
+The three core roles and 1/3/3 caps remain. A writer child still starts only after an actual supported document field is observed. New writer tasks share a persistent subscription app-server process with isolated threads; browser workers and existing CLI sessions retain their original transport. Failed turns never silently switch transports. Browser support in app-server is not yet verified and is disabled there.
 
-## Start
+The application acceptance and earlier suite counts below are historical. This rebuild did not resume a company or submit an application.
 
-From PowerShell in this directory:
+The current pipeline starts with a company name and careers URL. Discovery agents inspect a company's careers site; evaluator agents assess one job at a time; submission agents handle the job's application; and a separate Sol document child is started only when the observed form calls for materials. Agents decide what listings, requirements, questions, and fields mean. The host enforces task scope, persisted checkpoints, current document hashes, safe resume rules, and human action approvals rather than scripted skill or quote checks.
+
+- Fixed run scope is computer-science-related work in the United States, full-time, and on-site or hybrid. The optional role focus narrows this search; leaving it blank includes varied CS titles and duties such as software/developer, systems/platform, GPU/HPC, backend/frontend/full-stack, data, and automation. No exact “Software Engineer” title is required. Location is also optional. A company run has one discovery worker and up to three evaluators and three submission workers; a document child is outside that limit.
+- Questions pause only the affected job. First-application review and action-specific approvals are separate, human decisions. The review shows the current rendered PDFs, Markdown sources, form fields and observed values/evidence before a first final action.
+- A pipeline completes only when discovery reports full coverage and every selected listing has a verified submitted result or a discard. Excluded listings are outside that denominator. Prepared or ready materials do not count as submitted. Uncertain final actions remain unresolved.
+- Recruiter outcomes are entered manually with a source and note. Automatic employer-status polling is not available.
+- The isolated loopback HTTP exception exists only in the test fixture app and allows only the exact URL `http://127.0.0.1:8765/__fictional/board`. Normal app instances require HTTPS careers URLs.
+
+The normal dashboard is active with 89 historical Tesla submissions and 100 confirmed technology records (84 Yes, 16 No). Tesla is disabled. The legacy Zoox job and unanswered questions are preserved; its supervised agentic re-evaluation is tracked separately. The actual production activation preserved all original values across 26 tables while adding agentic metadata: [activation preservation report](data/demos/20261017T095651Z-post-activation-preservation/activation-preservation.json). A fresh consistent backup is retained under `data/backups/`.
+
+The first supervised live pilot also completed: Zoox **Software Engineer – C++ On-Vehicle Data**, Foster City, CA, with the exact title filter selected by the user. After the user's final review approval, Zoox displayed **Application Received!**, employer application ID `example-receipt-id`. The dashboard recorded one verified submission, completed the run automatically and left recruiter outcome pending. The worker's completed tab was closed and its absence independently verified. This is one live application, not a full unfiltered Zoox sweep. See [the current requirement audit](data/demos/20261017T112512Z-zoox-live-acceptance/final-requirement-audit.md).
+
+The real-agent fictional workflow passed end to end: dashboard start, browser discovery of three full descriptions, one evaluator approval, an on-demand Sol document child, reviewed PDFs, exact approved upload, receipt-backed submission, automatic completion and application-tab cleanup. The same submission session survived an interruption and missing-tab recovery. Evidence and earlier failures are retained in [the acceptance archive](data/demos/20261017T094449Z-agentic-fictional-acceptance/final-requirement-audit.md). This is synthetic local evidence, not an employer submission.
+
+Rendered checks also passed for [manual recruiter-status changes](data/integration/20261017T095008Z-agentic-fictional-manual-outcome-ui.json) and [stopping A while B continues](data/integration/20261017-agentic-controls-stop-isolation-ui.json). The control test uses the real manager and a test-only waiting runtime, with no application-agent calls. New verified submissions start as pending recruiter response when no status exists; manual and historical outcomes are preserved. Automatic recruiter polling is unavailable, so record employer responses through the outcome form with their source.
+
+The earlier full offline suite passed 152 tests. A later combined run had 166 passes and one incomplete UI fixture failure; its fixture correction passed the isolated rerun. Subsequent provenance/session checks passed two tests and the final rationale-label check passed one. Focused profile/manager/UI checks, source compilation, JavaScript syntax and whitespace checks passed; no new full-suite pass is claimed. One existing upstream deprecation warning remains. The fixture-only URL validation, asynchronous start-form reset, scoped internal-tool approvals and documented file-chooser procedure were corrected during the real browser trial. The normal service requires HTTPS careers URLs; no fictional applicant data was imported into it.
+
+## Start the local dashboard
+
+Double-click **Job Application Pipeline** on the Windows desktop to start the dashboard in the background and open it in your browser. It reuses an already running service. To recreate that shortcut, run `.\install-desktop-shortcut.ps1`; the launcher and startup logs are documented in [the user guide](docs/user-guide.md#start-and-stop-the-local-service).
+
+From PowerShell in this project directory:
 
 ```powershell
 .\run.ps1
 ```
 
-Open `http://127.0.0.1:8765`. The server binds only to the local computer. Close the terminal or press Ctrl+C to stop a foreground run. If an agent starts it in the background, its process record is saved in `data/server-process.json`.
+Before starting the worker-capable service, the launcher resolves the Codex CLI and checks only its version and existing login status; it does not start an agent task or make a model request. To run this check without starting the server, use `.\run.ps1 -PreflightOnly`. If the CLI is missing, set `JOB_PIPELINE_CODEX_PATH` to the installed executable or repair the official desktop CLI. If it is signed out, the preflight prints a quoted PowerShell login command for the resolved executable. Run it in the same Windows user session to use your existing ChatGPT account, then verify with the printed status command; no separate API key is required. `.\run.ps1 -Check` retains its offline test-only behavior and does not require CLI sign-in.
 
-For an already running background instance, review and manually run `restart.ps1`, then refresh the browser. Do not start another instance on the same port.
+Routine tailored résumé/cover-letter uploads can use the user's recorded standing authorization for approved jobs on the selected employer's application sites. Current file hashes and recipient scope accompany the worker's prepared materials; routine uploads do not generate another inbox approval. Other files/destinations and binding/CAPTCHA checkpoints retain their own requirements. See [the inbox and upload policy](docs/user-guide.md#answer-questions-and-review-checkpoints).
 
-The `.venv` environment is already installed. To recreate it using an available Python 3.11+ installation:
+On Windows, each Codex worker or probe process receives its own `TEMP`/`TMP` folder under `data/agent-runtime/`. This lets the read-only sandbox access the browser-control support files while keeping the override limited to that process; global PATH and sandbox settings are unchanged.
+
+Open `http://127.0.0.1:8765`. The normal service binds to this computer. After a reboot or service restart, refresh the existing dashboard tab to obtain a current local session, then explicitly choose **Resume this company** for the saved pipeline you want to continue. Interrupted work is not launched automatically; do not create a duplicate pipeline to recover it. Stop the foreground server with Ctrl+C in its owning terminal. Do not rely on the historical `data/server-process.json` record to identify a running service.
+
+The checked-in `.venv` can be recreated with an installed Python 3.11+ runtime:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Checks and worker commands
+## Isolated fictional fixture
+
+The fixture creates a new temporary workspace with synthetic candidate facts, a local three-listing board, and a receipt sink that validates the current rendered resume PDF hash. Prepare and serve it as a Python module from the project root:
 
 ```powershell
-.\run.ps1 -Check
-.\.venv\Scripts\python.exe tools\worker.py evaluation
-.\.venv\Scripts\python.exe tools\worker.py materials
-.\.venv\Scripts\python.exe tools\worker.py review
-.\.venv\Scripts\python.exe tools\batch.py --max-tasks 20
-.\.venv\Scripts\python.exe tools\local_worker_demo.py
-.\.venv\Scripts\python.exe tools\negative_review_demo.py
+python -m tools.agentic_fixture_harness prepare
+python -m tools.agentic_fixture_harness serve --workspace <path-printed-by-prepare>
 ```
 
-The demo uses fictional applicant/company data in a separate directory under `data/demos/`; it does not modify the real application ledger. Model calls consume the existing subscription's usage allowance. Usage reports record tokens and elapsed time; they are not dollar cost calculations.
+Serving does not start a pipeline. In the dashboard, use Company name `Fictional Mobility Systems`, Careers page URL `http://127.0.0.1:8765/__fictional/board`, Role title `Software Engineer`, and leave Location blank. This observes three fixture listings; fixed requirements and title narrowing select one. The test fixture's application contains synthetic values only. See [the fixture guide](docs/agentic-fixture-acceptance.md) for its checkpoints and limits.
 
-An evaluation can approve/discard/ask. Unknown mandatory technologies produce a shared question; user answers persist with context and affected jobs are reassessed. Non-technology eligibility questions and public listing facts that need further research are currently visible through job reasons; richer question routing is a remaining integration step.
+## Checks
 
-Material workers generate drafts. Rendering checks text and page counts; a separate model reviews factual support and every rendered page. Passed packages are frozen with PDF hashes and become ready for submission. An automated review can still miss an error; inspect the first live pilot before submitting. `config/runtime.json` points to the verified bundled document runtime, Poppler, Node and fonts on this computer.
+The [26 October token-efficiency report](docs/token-efficiency-20261026.md) records measured model counters, batching and cache changes, queue backpressure, and the rejected aggressive-compaction experiment. Application campaigns remain stopped until explicitly resumed.
 
-Source documents are imported from the previous task's canonical Markdown files. The original files are unchanged. Updated source imports preserve document snapshots and invalidate affected prepared work. Existing submissions remain protected against rediscovery and changed descriptions.
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+node --check app/static/app.js
+```
 
-## Next implementation steps
+## Historical tools and evidence
 
-1. Resolve the saved local-site permission, then verify local form filling/upload, same-session pause/resume, receipt capture and cleanup. Worker inventory is already verified.
-2. Activate the updated service with the reviewed manual restart helper, then visually check the new company/batch/PDF controls.
-3. Finish general eligibility-question routing and public listing research gaps; technology questions already have the full answer/requeue flow.
-4. Integrate browser submission checkpoints, applicable action-time approvals, receipts/account reconciliation and tab closure.
-5. Select a non-Tesla live pilot with the user after the local browser test passes. Browser-based company adapters and recurring runs can follow.
+The earlier feed-first workflow, public Greenhouse/Lever adapters, and scripted evaluation/material/review workers remain available for historical records and bounded diagnostics. They are not the current agentic decision path; do not treat their fixed semantic gates or demo outcomes as current application decisions. The previous Greenhouse public-feed capture and older scripted demos are documented in [integration-status.md](integration-status.md).
 
-See [implementation-plan.md](implementation-plan.md) and [integration-status.md](integration-status.md).
+The canonical fictional browser-practice run completed on 2026-10-15 in about 193 seconds. The practice server verified the synthetic name, email, sponsorship choice, fixture filename, and uploaded file hash. The browser's email readback was masked; the local receipt is authoritative. This result proves only that fixed fictional form flow, not an employer submission.
