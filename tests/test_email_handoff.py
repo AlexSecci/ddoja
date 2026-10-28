@@ -107,3 +107,17 @@ def test_verification_proof_redacts_digits_and_allows_only_one_final_continuatio
         assert s._agent_begin_final_action(db,w,{})['authorized']
         w=db.execute('SELECT w.*,p.company_id,p.stop_requested FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?',(wid,)).fetchone()
         with pytest.raises(Conflict,match='may already have started'):s._agent_begin_final_action(db,w,{})
+    # Completing account freshness must not expose code boxes still visible on
+    # the form; the subsequent genuine receipt remains available as evidence.
+    with s.connect(write=True) as db:
+        db.execute("UPDATE agent_browser_controls SET state='closed' WHERE worker_id=?",(wid,))
+    event_id=s.agent_runtime_event(wid,event)
+    with s.connect() as db:
+        payload=json.loads(db.execute('SELECT payload FROM agent_runtime_events WHERE id=?',(event_id,)).fetchone()[0])
+        assert payload['authentication_redacted'] and 'textbox' not in json.dumps(payload)
+    receipt=json.loads(json.dumps(event))
+    receipt['transport_event']['item']['result']['content'][0]['text']='### Page\n- Page URL: '+j['url']+'/confirmation\n### Snapshot\nThank you for applying. Your application has been received.'
+    receipt_id=s.agent_runtime_event(wid,receipt)
+    with s.connect() as db:
+        payload=json.loads(db.execute('SELECT payload FROM agent_runtime_events WHERE id=?',(receipt_id,)).fetchone()[0])
+        assert not payload.get('authentication_redacted') and 'has been received' in json.dumps(payload)

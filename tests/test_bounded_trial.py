@@ -127,3 +127,16 @@ def test_completion_only_run_has_no_time_cutoff_but_cannot_start_other_tasks(tmp
     assert not store.reserve_agent_worker(discovery['id'])
     assert store.reserve_agent_worker(evaluator['id'])
     assert store.agent_trial_stop_reason(pipeline['id']) is None
+
+
+def test_terminal_receipt_does_not_interrupt_live_turn_cleanup(tmp_path):
+    store,pipeline,discovery,jobs=prepared(tmp_path)
+    store.configure_agent_trial(pipeline['id'],jobs[:1])
+    store.resume_agent_pipeline(pipeline['id'])
+    assert store.reserve_agent_worker(discovery['id'])
+    with store.connect(write=True) as db:
+        db.execute("UPDATE jobs SET phase='submitted' WHERE id=?",(jobs[0],))
+    assert store.agent_trial_stop_reason(pipeline['id']) is None
+    with store.connect(write=True) as db:
+        db.execute("UPDATE agent_workers SET turn_active=0,state='completed' WHERE id=?",(discovery['id'],))
+    assert 'terminal results' in store.agent_trial_stop_reason(pipeline['id'])

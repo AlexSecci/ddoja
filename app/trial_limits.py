@@ -55,6 +55,8 @@ def stop_reason(db, policy):
         return "Supervised trial reached its worker-invocation limit."
     placeholders = ','.join('?' for _ in policy["job_ids"])
     remaining = db.execute("SELECT 1 FROM jobs WHERE id IN (" + placeholders + ") AND phase NOT IN ('submitted','discarded') LIMIT 1", policy["job_ids"]).fetchone()
-    if not remaining:
+    # A committed receipt precedes the same turn's safe tab cleanup and usage
+    # report. Admission is already closed to other tasks; let that turn exit.
+    if not remaining and not active:
         return "All jobs selected for the supervised trial reached terminal results."
     return None

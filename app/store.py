@@ -4238,9 +4238,14 @@ class Store:
             # Mail bodies/codes must not be persisted as application evidence.
             # Retain the genuine event's identity, result status and hash so a
             # fresh browser observation can still close the sign-in mutex.
-            if row["role"] in {"submission","discovery"} and (db.execute("SELECT 1 FROM meta WHERE key=?",
+            # A worker can acknowledge account freshness before the final
+            # Greenhouse click. Its still-visible code boxes remain sensitive
+            # even after that acknowledgement releases the auth mutex.
+            verification_visible = ('enter the 8-character code to confirm' in json.dumps(event)
+                                    and self._agent_observed_application_url(db,row,event))
+            if row["role"] in {"submission","discovery"} and (verification_visible or (db.execute("SELECT 1 FROM meta WHERE key=?",
                     ("agent_signin_automation:" + row["pipeline_id"],)).fetchone() or db.execute("SELECT 1 FROM meta WHERE key='routine_email_tokens'").fetchone()) and db.execute(
-                    "SELECT 1 FROM agent_browser_controls WHERE control_type='company_auth' AND state='open' AND worker_id=?", (worker_id,)).fetchone():
+                    "SELECT 1 FROM agent_browser_controls WHERE control_type='company_auth' AND state='open' AND worker_id=?", (worker_id,)).fetchone()):
                 raw = json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8")
                 metadata = {"type": event_type, "session_id": session_id or row["session_id"], "tool_name": tool_name,
                             "success": success_value, "authentication_redacted": True,
