@@ -193,7 +193,7 @@ def _parse_multipart(content_type: str, body: bytes) -> dict[str, tuple[str | No
 
 def install_fictional_routes(app: FastAPI, workspace: Path) -> None:
     """Mount the local-only site and receipt sink on an explicitly test-mode app."""
-    from app.store import Store
+    from app.store import Store, Conflict
 
     workspace = workspace.resolve()
     marker_path = workspace / FIXTURE_MARKER
@@ -287,8 +287,12 @@ def install_fictional_routes(app: FastAPI, workspace: Path) -> None:
         upload_path = Path(artifact.get("upload_path") or "").resolve()
         source_path = Path(artifact["path"]).resolve()
         package_root = source_path.parents[1]
+        try:
+            render_root=store._agent_render_root(package_root,upload_path)
+        except Conflict as error:
+            raise HTTPException(409,'The fixture PDF escaped its canonical package.') from error
         if (artifact.get("filename") != "resume.md" or upload_path.name != "resume.pdf"
-                or upload_path.parent.name != "rendered" or upload_path.parent.parent != package_root
+                or upload_path.parent != render_root
                 or package_root.parent.name != "agent"
                 or not hmac.compare_digest(resume_hash, artifact.get("pdf_sha256", ""))):
             raise HTTPException(409, "The upload does not match this fixture job's current rendered resume PDF.")

@@ -3428,6 +3428,16 @@ class Store:
                                                 "pdf_sha256")}
                 for _, item in sorted(artifacts.items())]
 
+    @staticmethod
+    def _agent_render_root(package_root,pdf_path):
+        legacy=(package_root/'rendered').resolve();proposed=pdf_path.parent
+        if proposed==legacy:return legacy
+        if (proposed.name=='rendered' and proposed.parent.parent.name=='renders'
+                and proposed.parent.parent.parent==package_root
+                and re.fullmatch(r'[0-9a-f]{64}',proposed.parent.name)):
+            return proposed
+        raise Conflict('The rendered artifact is outside the canonical package path.')
+
     def _agent_review_artifacts(self, db, artifacts):
         """Build a review-only presentation separate from the approval snapshot."""
         result = []
@@ -3442,8 +3452,8 @@ class Store:
             if self.root not in package_root.parents:
                 raise Conflict("The review artifact package escaped the application workspace.")
             source_path = (self.root / str(row.get("path") or "")).resolve()
-            rendered_root = (package_root / "rendered").resolve()
             pdf_path = (self.root / str(row.get("pdf_path") or "")).resolve()
+            rendered_root=self._agent_render_root(package_root,pdf_path)
             if (package_root not in source_path.parents or not source_path.is_file()
                     or source_path.name != source_names[kind]
                     or digest(source_path.read_text(encoding="utf-8")) != row.get("sha256")):
@@ -4946,7 +4956,7 @@ class Store:
                 media_type = row["media_type"] or "text/markdown"
                 checksum = row["sha256"]
             else:
-                rendered_root = (package_root / "rendered").resolve()
+                rendered_root = self._agent_render_root(package_root,(self.root/str(row['pdf_path'] or '')).resolve())
                 if variant == "pdf":
                     expected_name = {"resume": "resume.pdf", "cover_letter": "cover-letter.pdf"}[row["kind"]]
                     path = (self.root / str(row["pdf_path"] or "")).resolve()

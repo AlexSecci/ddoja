@@ -147,7 +147,10 @@ def render_agent_documents(store, published, *, worker_id: str | None = None):
     from .efficiency_features import features
     config['fit_pages']=features(store.root)['document_edits']
     renderer_sha256 = agent_renderer_fingerprint(config)
-    rendered_root = (package_root / "rendered").resolve()
+    # Render bytes are immutable per source set + renderer. Later content edits
+    # must not overwrite a previous version's PDF/previews or poison its cache.
+    render_key=hashlib.sha256(json.dumps({'renderer':renderer_sha256,'sources':sorted((kind,item['sha256']) for kind,item,_,_ in entries)},sort_keys=True).encode()).hexdigest()
+    rendered_root = (package_root / 'renders' / render_key / "rendered").resolve()
     if not rendered_root.is_relative_to(package_root):
         raise ValueError("Rendered document output escaped its package.")
     rendered_root.mkdir(parents=True, exist_ok=True)

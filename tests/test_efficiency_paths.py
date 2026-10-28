@@ -99,3 +99,34 @@ def test_document_grouped_edits_preserve_immutable_source_and_scope(tmp_path):
     request['edits'][0]['expected_sha256']=a['sha256'];request['edits'][0]['replacements'][0]['old']='Absent passage'
     with pytest.raises(Conflict,match='absent or ambiguous'):s.agent_action(child['id'],cap,'edit_documents',request)
     with s.connect() as db:assert db.execute('SELECT count(*) FROM agent_artifacts WHERE worker_id=?',(child['id'],)).fetchone()[0]==2
+    with s.connect(write=True) as db:
+        foreign=dict(db.execute('SELECT * FROM agent_artifacts WHERE id=?',(a['id'],)).fetchone())
+        foreign.update(id='foreign-draft',worker_id=parent['id'])
+        db.execute('INSERT INTO agent_artifacts('+','.join(foreign)+') VALUES('+','.join('?' for _ in foreign)+')',list(foreign.values()))
+    request['edits'][0]['base_source_id']='artifact:foreign-draft'
+    with pytest.raises(Conflict,match='current scoped draft'):s.agent_action(child['id'],cap,'edit_documents',request)
+
+
+def test_document_edit_returns_actual_new_rendered_previews(tmp_path):
+    from tools.agent_mcp import render_and_register_documents
+    s=Store(tmp_path);_,_,child=_create_document_parent(s)
+    assert s.reserve_agent_worker(child['id']);cap=s.agent_launch_context(child['id'])['capability']
+    bridge=AgentMCPBridge(child['id'],cap,'document',s.agent_action,
+        lambda value:render_and_register_documents(s,child['id'],cap,value),root=tmp_path)
+    first,images=bridge.invoke('publish_documents',{'artifacts':[{'kind':'resume','markdown':'# Test Candidate\n\n## Summary\nConfirmed C++ work.\n'}]})
+    assert images and first['rendered_previews'][0]['pages']==1
+    a=first['artifacts'][0]
+    old_pdf=s.get_agent_artifact(a['id'])
+    original_pdf=(tmp_path/old_pdf['pdf_path']).read_bytes()
+    updated,new_images=bridge.invoke('edit_documents',{'edits':[{'kind':'resume','base_source_id':'artifact:'+a['id'],'expected_sha256':a['sha256'],
+        'replacements':[{'old':'Confirmed C++ work.','new':'Confirmed C++ systems work.'}]}]})
+    assert new_images and new_images[0]['data']!=images[0]['data']
+    assert (tmp_path/old_pdf['pdf_path']).read_bytes()==original_pdf
+    with s.connect() as db:
+        row=db.execute('SELECT * FROM agent_artifacts WHERE id=?',(updated['artifacts'][0]['id'],)).fetchone()
+        assert row['pdf_sha256'] and json.loads(row['preview_paths'])
+        assert row['pdf_path']!=old_pdf['pdf_path']
+    reused,_=bridge.invoke('publish_documents',{'artifacts':[{'kind':'resume','markdown':(tmp_path/a['path']).read_text()}]})
+    from app.rendering import render_agent_documents
+    cached=render_agent_documents(s,reused,worker_id=child['id'])
+    assert cached[0]['cache_hit'] and cached[0]['sha256']==old_pdf['pdf_sha256']
