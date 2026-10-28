@@ -2288,6 +2288,66 @@ class Store:
                        "reason": "Existing approval had incorrectly reused an earlier spent attempt."}, worker["job_id"], "supervisor")
         return self.get_agent_worker(worker["id"])
 
+    def reconcile_rejected_greenhouse_code(self, worker_id, event_id):
+        """Reconcile a proved code rejection, never an ambiguous application send.
+
+        This operator recovery preserves the prior send history and human scope.
+        It prepares an inactive worker for the same application; it does not
+        launch work, click Submit, grant consent or claim a receipt.
+        """
+        from .ephemeral_auth import AUTH_ACTIONS
+        with self.connect(write=True) as db:
+            worker = db.execute("SELECT * FROM agent_workers WHERE id=?", (worker_id,)).fetchone()
+            if (not worker or worker['role'] != 'submission' or worker['turn_active']
+                    or worker['state'] not in {'stopped', 'uncertain', 'failed', 'interrupted'}):
+                raise Conflict('Code rejection recovery requires an inactive submission worker.')
+            job = db.execute('SELECT * FROM jobs WHERE id=?', (worker['job_id'],)).fetchone()
+            if (not job or job['phase'] == 'submitted'
+                    or db.execute("SELECT 1 FROM agent_submission_results WHERE job_id=? AND state='submitted'",
+                                  (worker['job_id'],)).fetchone()):
+                raise Conflict('A submitted application cannot enter code rejection recovery.')
+            observed = self._agent_latest_cua_event(db, worker, success=True)
+            proof = (observed or {}).get('verification') or {}
+            if (not observed or observed['event_id'] != event_id
+                    or observed.get('application_url') != job['url']
+                    or not proof.get('present') or not proof.get('invalid_code')
+                    or proof.get('submit_enabled') is not False):
+                raise Conflict('A fresh exact-page Invalid security code observation is required; ambiguous sends stay uncertain.')
+            current_profile = self.profile_version(db)
+            approved = False
+            for item in db.execute("SELECT * FROM agent_inbox WHERE worker_id=? AND state='approved'", (worker_id,)):
+                context = self._agent_decode(item['context'], {})
+                if (item['action'] in AUTH_ACTIONS and context.get('job_url') == job['url']
+                        and context.get('jd_version') == worker['jd_version'] == job['jd_version']
+                        and context.get('profile_version') == worker['profile_version'] == current_profile):
+                    approved = True
+            if not approved:
+                raise Conflict('The same current email-verification step needs its exact human approval.')
+            context = self._agent_decode(worker['context'], {})
+            history = context.setdefault('verified_code_rejections', [])
+            if any(h['source_event_id'] == event_id for h in history):
+                raise Conflict('This rejection observation already granted its recovery.')
+            history.append({'source_event_id': event_id, 'reconciled_at': timestamp(),
+                            'prior_send_may_have_occurred': self._context_may_have_sent_final(context, worker['checkpoint']),
+                            'prior_authorized_at': context.get('final_action_authorized_at'),
+                            'prior_verification_scope': context.get('email_verification_final_scope'),
+                            'outcome': 'Greenhouse explicitly rejected the security code; no submission accepted.'})
+            context['final_action_may_have_been_sent'] = False
+            context.pop('email_verification_final_scope', None)
+            context.pop('reconciliation_recovery', None)
+            now = timestamp()
+            db.execute("UPDATE agent_workers SET state='stopped',checkpoint='security_code_rejection_reconciled',"
+                       "context=?,error='',completed_at=NULL,capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",
+                       (json.dumps(context), now, worker_id))
+            db.execute("UPDATE jobs SET run_status='idle',reason='Verified Greenhouse security-code rejection; same-application recovery pending.' WHERE id=?",
+                       (worker['job_id'],))
+            db.execute("UPDATE pipeline_jobs SET agent_status='approved' WHERE pipeline_id=? AND job_id=?",
+                       (worker['pipeline_id'], worker['job_id']))
+            self.event(db, 'agent.security_code_rejection_reconciled', {'worker_id': worker_id,
+                       'source_event_id': event_id, 'prior_send_history_preserved': True,
+                       'human_approval_unchanged': True, 'application_accepted': False}, worker['job_id'], 'supervisor')
+        return self.get_agent_worker(worker_id)
+
     def _agent_record_inbox_decision(self, db, row, decision, provenance, now, *, batch_id=None):
         """Caller holds the write transaction and has validated this checkpoint."""
         db.execute("UPDATE agent_inbox SET state=?,response=?,provenance=?,updated_at=?,resolved_at=? WHERE id=?",
@@ -4264,7 +4324,12 @@ class Store:
             if (row["state"] not in {"running", "waiting_question", "waiting_approval", "waiting_child", "waiting_browser",
                                       "quota_paused", "completed", "discarded", "uncertain", "failed"}
                     and not (row["state"] == "queued" and row["turn_active"]
-                             and (not session_id or session_id == row["session_id"]))):
+                             and (not session_id or session_id == row["session_id"]))
+                    and not (row['state'] in {'stopped', 'interrupted'} and not row['turn_active']
+                             and event.get('supervisor_read_only_observation') is True
+                             and tool_name == 'playwright.browser_snapshot' and success == 1
+                             and session_id == row['session_id']
+                             and self._agent_observed_application_url(db, row, event))):
                 raise Conflict("Runtime events can only be attached to a running worker.")
             # Mail bodies/codes must not be persisted as application evidence.
             # Retain the genuine event's identity, result status and hash so a
@@ -5478,7 +5543,10 @@ class Store:
                 continue
             fields=group[:button.start()]
             count=len(re.findall(r'(?m)^\s*- textbox(?: "Security code")? \[[^\n]+?\]: (?:"[A-Za-z0-9]"|[A-Za-z0-9])\s*$',fields))
-            return {'present':True,'filled_boxes':count,'submit_enabled':'[disabled]' not in button.group(1)}
+            proof = {'present':True,'filled_boxes':count,'submit_enabled':'[disabled]' not in button.group(1)}
+            if re.search(r'(?m)^\s*- (?:paragraph|alert)(?: \[[^\n]+\])?: Invalid security code\s*$', fields):
+                proof['invalid_code'] = True
+            return proof
         return None
 
     def _agent_scope_isolated_tab_approval(self, db, worker_id):

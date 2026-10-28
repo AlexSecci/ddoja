@@ -53,6 +53,42 @@ def test_code_is_one_use_encrypted_bound_to_approval_and_current_nonce(tmp_path,
         assert not ephemeral_auth.permitted_final(s,db,w)
 
 
+@pytest.mark.parametrize('invalid_code', [False, True])
+def test_recovery_requires_explicit_current_code_rejection_and_preserves_history(tmp_path, monkeypatch, invalid_code):
+    s, p, j, wid = fixture(tmp_path, monkeypatch)
+    boxes = '\n'.join('- textbox [ref=code%d]: A' % n for n in range(8))
+    error = '\n- paragraph [ref=error]: Invalid security code' if invalid_code else ''
+    text = ('### Page\n- Page URL: ' + j['url'] + '\n### Snapshot\n'
+            '- group "enter the 8-character code to confirm":\n' + boxes + error
+            + '\n- button "Submit application" [disabled] [ref=submit]')
+    event = {'type': 'tool_result', 'tool_name': 'playwright.browser_snapshot', 'success': True,
+             'session_id': 'fixture-session', 'transport_event': {'type': 'item.completed', 'item': {
+                 'type': 'mcp_tool_call', 'server': 'playwright', 'tool': 'browser_snapshot',
+                 'status': 'completed', 'result': {'content': [{'type': 'text', 'text': text}]}}}}
+    event_id = s.agent_runtime_event(wid, event)
+    with s.connect(write=True) as db:
+        w = db.execute('SELECT context FROM agent_workers WHERE id=?', (wid,)).fetchone()
+        context = json.loads(w['context']);context['final_action_may_have_been_sent'] = True
+        db.execute("UPDATE agent_workers SET state='stopped',turn_active=0,context=? WHERE id=?", (json.dumps(context), wid))
+        db.execute("UPDATE jobs SET run_status='submission_uncertain' WHERE id=?", (j['id'],))
+    with pytest.raises(Conflict, match='running worker'):
+        s.agent_runtime_event(wid, event)
+    event['supervisor_read_only_observation'] = True
+    event_id = s.agent_runtime_event(wid, event)
+    if not invalid_code:
+        with pytest.raises(Conflict, match='fresh exact-page'):
+            s.reconcile_rejected_greenhouse_code(wid, event_id)
+        assert s.get_agent_worker(wid)['context']['final_action_may_have_been_sent']
+    else:
+        recovered = s.reconcile_rejected_greenhouse_code(wid, event_id)
+        assert recovered['state'] == 'stopped' and recovered['session_id'] == 'fixture-session'
+        assert recovered['context']['final_action_may_have_been_sent'] is False
+        assert recovered['context']['verified_code_rejections'][0]['prior_send_may_have_occurred']
+        assert s.get_job(j['id'])['run_status'] == 'idle'
+        with pytest.raises(Conflict, match='already granted'):
+            s.reconcile_rejected_greenhouse_code(wid, event_id)
+
+
 @pytest.mark.parametrize('expired,wrong_nonce',[(True,False),(False,True)])
 def test_expired_or_previous_request_token_is_not_disclosed(tmp_path,monkeypatch,expired,wrong_nonce):
     s,_,_,wid=fixture(tmp_path,monkeypatch)
