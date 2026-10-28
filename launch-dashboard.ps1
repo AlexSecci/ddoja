@@ -45,7 +45,9 @@ try {
 
         $serverOut = Join-Path $launchLogDirectory "$launchStamp-server.stdout.log"
         $serverErr = Join-Path $launchLogDirectory "$launchStamp-server.stderr.log"
-        Start-Process -FilePath $taskPython -ArgumentList '-m', 'uvicorn', 'app.server:create_app', '--factory', '--host', '127.0.0.1', '--port', '8765' -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr | Out-Null
+        $server = Start-Process -FilePath $taskPython -ArgumentList '-m', 'uvicorn', 'app.server:create_app', '--factory', '--host', '127.0.0.1', '--port', '8765' -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -PassThru
+        @{ pid=$server.Id; started_at=$server.StartTime.ToUniversalTime().ToString('o'); url=$dashboardUrl; executable=$taskPython } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskRoot 'data\server-process.json')
 
         $startupDeadline = [DateTime]::UtcNow.AddSeconds(45)
         while (!(Test-DashboardReady)) {

@@ -46,7 +46,7 @@ Routine tailored résumé/cover-letter uploads can use the user's recorded stand
 
 On Windows, each Codex worker or probe process receives its own `TEMP`/`TMP` folder under `data/agent-runtime/`. This lets the read-only sandbox access the browser-control support files while keeping the override limited to that process; global PATH and sandbox settings are unchanged.
 
-Open `http://127.0.0.1:8765`. The normal service binds to this computer. After a reboot or service restart, refresh the existing dashboard tab to obtain a current local session, then explicitly choose **Resume this company** for the saved pipeline you want to continue. Interrupted work is not launched automatically; do not create a duplicate pipeline to recover it. Stop the foreground server with Ctrl+C in its owning terminal. Do not rely on the historical `data/server-process.json` record to identify a running service.
+Open `http://127.0.0.1:8765`. The normal service binds to this computer. After a reboot or service restart, refresh the existing dashboard tab to obtain a current local session, then explicitly choose **Resume this company** for the saved pipeline you want to continue. Interrupted work is not launched automatically; do not create a duplicate pipeline to recover it. Stop the foreground server with Ctrl+C in its owning terminal. For a background dashboard started by the launcher, run `.\restart.ps1`; it validates the recorded executable, UTC creation time and child process before stopping anything. A stale or mismatched identity is refused.
 
 The checked-in `.venv` can be recreated with an installed Python 3.11+ runtime:
 
