@@ -287,6 +287,7 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     async def lifespan(application):
         # Recovery records interrupted sessions but never auto-starts any old or new run.
         application.state.agent_pipeline_manager.recover_interrupted()
+        store.release_completed_auth_controls()
         try:
             yield
         finally:

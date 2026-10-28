@@ -2379,6 +2379,15 @@ class Store:
             if changed:self.event(db,'agent.security_code_recovery_queued',{'worker_id':worker_id,'source_event_id':evidence['event_id']},worker['job_id'],'scheduler')
         return bool(changed)
 
+    def release_completed_auth_controls(self):
+        """Retire orphan auth locks only after an inactive committed submission."""
+        with self.connect(write=True) as db:
+            rows=db.execute("SELECT c.* FROM agent_browser_controls c JOIN agent_workers w ON w.id=c.worker_id WHERE c.state='open' AND c.control_type='company_auth' AND w.state='completed' AND w.turn_active=0 AND EXISTS(SELECT 1 FROM agent_submission_results r WHERE r.worker_id=w.id AND r.state='submitted')").fetchall()
+            for row in rows:
+                db.execute("UPDATE agent_browser_controls SET state='closed' WHERE scope_key=? AND worker_id=?",(row['scope_key'],row['worker_id']))
+                self.event(db,'agent.completed_auth_control_released',{'scope_key':row['scope_key'],'worker_id':row['worker_id']},actor='scheduler')
+            return len(rows)
+
     def _agent_record_inbox_decision(self, db, row, decision, provenance, now, *, batch_id=None):
         """Caller holds the write transaction and has validated this checkpoint."""
         db.execute("UPDATE agent_inbox SET state=?,response=?,provenance=?,updated_at=?,resolved_at=? WHERE id=?",
@@ -4096,10 +4105,14 @@ class Store:
                                     "AND state NOT IN ('completed','discarded','superseded','uncertain','session_missing')", (pipeline_id,)).fetchall():
                 if trial and trial.get('allowed_worker_ids') and saved['id'] not in trial['allowed_worker_ids']:
                     continue
+                if trial and (saved['role']=='discovery' and trial['max_discovery_invocations']==0 or saved['role']!='discovery' and saved['job_id'] not in trial['job_ids']):
+                    continue
                 self._agent_prepare_browser_resume(db, saved, resume_epoch, now, "user explicitly resumed this pipeline")
             for worker in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND state IN ('stopped','interrupted','failed','quota_paused')",
                                      (pipeline_id,)).fetchall():
                 if trial and trial.get('allowed_worker_ids') and worker['id'] not in trial['allowed_worker_ids']:
+                    continue
+                if trial and (worker['role']=='discovery' and trial['max_discovery_invocations']==0 or worker['role']!='discovery' and worker['job_id'] not in trial['job_ids']):
                     continue
                 context = self._agent_decode(worker["context"], {})
                 if context.get("snapshot_supersession"):
@@ -6457,6 +6470,7 @@ class Store:
         db.execute("UPDATE pipeline_jobs SET agent_status=? WHERE pipeline_id=? AND job_id=?",
                    (status, worker["pipeline_id"], worker["job_id"]))
         if status == "submitted":
+            db.execute("UPDATE agent_browser_controls SET state='closed' WHERE control_type='company_auth' AND worker_id=?",(worker['id'],))
             db.execute("UPDATE jobs SET phase='submitted',run_status='idle',active_stage=NULL,lease_owner=NULL,lease_token=NULL,"
                        "lease_until=NULL,reason=? WHERE id=?", (detail or "Agent recorded a submitted application with successful CUA evidence.", worker["job_id"]))
             # A verified new submission is awaiting a recruiter response until

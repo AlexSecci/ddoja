@@ -242,6 +242,20 @@ def test_committed_receipt_is_idempotent_and_cannot_be_downgraded(tmp_path,monke
         assert db.execute('SELECT count(*) FROM agent_submission_results WHERE worker_id=?',(wid,)).fetchone()[0]==1
     s.finish_agent_turn(wid,{'disposition':'failed','error':'Synthetic post-receipt cleanup error'})
     assert s.get_agent_worker(wid)['state']=='completed' and s.get_job(j['id'])['phase']=='submitted'
+    with s.connect() as db:
+        assert db.execute("SELECT state FROM agent_browser_controls WHERE worker_id=?",(wid,)).fetchone()[0]=='closed'
+
+
+def test_startup_releases_only_inactive_auth_owner_with_a_real_receipt(tmp_path,monkeypatch):
+    s,p,j,wid=fixture(tmp_path,monkeypatch)
+    assert s.release_completed_auth_controls()==0
+    with s.connect(write=True) as db:
+        db.execute("UPDATE agent_workers SET state='completed',turn_active=0 WHERE id=?",(wid,))
+    assert s.release_completed_auth_controls()==0
+    with s.connect(write=True) as db:
+        db.execute("INSERT INTO agent_submission_results(id,pipeline_id,worker_id,job_id,state,detail,observations,event_ids,created_at) VALUES('fictional-receipt',?,?,?,'submitted','Synthetic receipt','{}','[]','2026-10-28')",(p['id'],wid,j['id']))
+    assert s.release_completed_auth_controls()==1
+    assert s.release_completed_auth_controls()==0
 
 
 def test_concurrent_provider_endpoints_are_per_worker_not_shared_runtime_state(tmp_path):
