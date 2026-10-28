@@ -12,7 +12,7 @@ def read(db, pipeline_id):
 
 def runs(db, policy):
     return db.execute("SELECT r.*,w.role FROM agent_execution_runs r JOIN agent_workers w ON w.id=r.worker_id "
-                      "WHERE w.pipeline_id=? AND r.rowid>?", (policy["pipeline_id"], policy["execution_watermark"])).fetchall()
+                      "WHERE w.pipeline_id=? AND r.rowid>? AND COALESCE(r.state,'')!='not_launched'", (policy["pipeline_id"], policy["execution_watermark"])).fetchall()
 
 
 def allows(db, worker, desired, *, may_have_sent=False):

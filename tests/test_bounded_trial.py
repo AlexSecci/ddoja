@@ -98,3 +98,17 @@ def test_preparing_trial_preserves_quota_and_rejects_possible_send(tmp_path):
         db.execute("UPDATE agent_workers SET context=? WHERE id=?", (json.dumps({'final_action_may_have_been_sent': True}), submission))
     with pytest.raises(Conflict, match='possibly sent'):
         store.configure_agent_trial(pipeline['id'], jobs[:1])
+
+
+def test_live_trial_stop_check_keeps_active_turn_running_then_obeys_deadline(tmp_path):
+    store, pipeline, discovery, jobs = prepared(tmp_path)
+    store.configure_agent_trial(pipeline['id'], jobs[:1])
+    store.resume_agent_pipeline(pipeline['id'])
+    assert store.reserve_agent_worker(discovery['id'])
+    manager = AgentPipelineManager(store)
+    try:
+        assert manager._stopping(discovery['id'], pipeline['id']) is False
+        expire(store, pipeline['id'])
+        assert manager._stopping(discovery['id'], pipeline['id']) is True
+    finally:
+        manager.shutdown()

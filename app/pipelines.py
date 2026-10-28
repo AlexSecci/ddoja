@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 import inspect
 import threading
+import time
 
 from .discovery import scan_company
 from .store import Conflict, Store
