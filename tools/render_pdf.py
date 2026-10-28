@@ -37,7 +37,7 @@ def visible(text):
     return value.replace("**", "").replace("`", "")
 
 
-def render(source, target, pdftoppm, max_pages, regular=None, bold=None):
+def render(source, target, pdftoppm, max_pages, regular=None, bold=None, fit_pages=False, _compact=False):
     text = source.read_text(encoding="utf-8")
     if not text.strip():
         raise ValueError("The Markdown document is empty.")
@@ -52,11 +52,11 @@ def render(source, target, pdftoppm, max_pages, regular=None, bold=None):
         unsupported = {char for char in visible(text) if not char.isspace() and ord(char) not in pdfmetrics.getFont(font).face.charToGlyph}
         if unsupported:
             raise ValueError("The configured font cannot display every character in this document.")
-    body = ParagraphStyle("Body", fontName=font, fontSize=10, leading=13.4, spaceAfter=5, alignment=TA_LEFT)
-    title = ParagraphStyle("Name", parent=body, fontName=bold_font, fontSize=20, leading=24, spaceAfter=9)
+    body = ParagraphStyle("Body", fontName=font, fontSize=10, leading=12.0 if _compact else 13.4, spaceAfter=3 if _compact else 5, alignment=TA_LEFT)
+    title = ParagraphStyle("Name", parent=body, fontName=bold_font, fontSize=20, leading=24, spaceAfter=6 if _compact else 9)
     heading = ParagraphStyle("Section", parent=body, fontName=bold_font, fontSize=11, leading=14,
-                             spaceBefore=9, spaceAfter=5, keepWithNext=True)
-    subheading = ParagraphStyle("Subsection", parent=heading, fontSize=10, leading=13, spaceBefore=6)
+                             spaceBefore=6 if _compact else 9, spaceAfter=3 if _compact else 5, keepWithNext=True)
+    subheading = ParagraphStyle("Subsection", parent=heading, fontSize=10, leading=12 if _compact else 13, spaceBefore=4 if _compact else 6)
     story, paragraph, bullets = [], [], []
     def flush():
         if paragraph:
@@ -65,7 +65,7 @@ def render(source, target, pdftoppm, max_pages, regular=None, bold=None):
         if bullets:
             story.append(ListFlowable([ListItem(Paragraph(inline(item), body)) for item in bullets],
                                       bulletType="bullet", leftIndent=12, bulletFontName=font,
-                                      bulletFontSize=6, spaceAfter=5))
+                                      bulletFontSize=6, spaceAfter=3 if _compact else 5))
             bullets.clear()
     for line in text.splitlines():
         line = line.strip()
@@ -89,6 +89,10 @@ def render(source, target, pdftoppm, max_pages, regular=None, bold=None):
                       topMargin=36, bottomMargin=36, title=source.stem, author="").build(story)
     reader = PdfReader(target)
     if not 1 <= len(reader.pages) <= max_pages:
+        if fit_pages and not _compact:
+            result=render(source,target,pdftoppm,max_pages,regular,bold,False,True)
+            result['render_attempts']=2
+            return result
         raise ValueError(f"Rendered document has {len(reader.pages)} pages; maximum is {max_pages}. Shorten the draft before review.")
     extracted = "\n".join(page.extract_text() or "" for page in reader.pages)
     def normalized(value):
@@ -100,7 +104,8 @@ def render(source, target, pdftoppm, max_pages, regular=None, bold=None):
     images = [str(path) for path in sorted(target.parent.glob(target.stem + "-*.png"))]
     if len(images) != len(reader.pages):
         raise ValueError("Rendered preview count does not match PDF page count.")
-    return {"pdf": str(target), "pages": len(reader.pages), "previews": images, "text_matches": True}
+    return {"pdf": str(target), "pages": len(reader.pages), "previews": images, "text_matches": True,
+            "layout_profile":"compact_10pt" if _compact else "standard_10pt","render_attempts":1,"body_font_size":10}
 
 
 if __name__ == "__main__":
@@ -111,6 +116,11 @@ if __name__ == "__main__":
     parser.add_argument("--max-pages", type=int, required=True)
     parser.add_argument("--font-regular")
     parser.add_argument("--font-bold")
+    parser.add_argument("--fit-pages",action='store_true')
     args = parser.parse_args()
-    result = render(args.source, args.target, args.pdftoppm, args.max_pages, args.font_regular, args.font_bold)
+    try:
+        result = render(args.source, args.target, args.pdftoppm, args.max_pages, args.font_regular, args.font_bold,args.fit_pages)
+    except ValueError as error:
+        import sys
+        print(str(error),file=sys.stderr);sys.exit(2)
     print(json.dumps(result))

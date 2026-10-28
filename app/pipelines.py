@@ -595,6 +595,18 @@ class AgentPipelineManager:
                 pass
         finally:
             try:
+                latest=self.store.get_agent_worker(worker_id)
+                if latest['state'] in {'completed','discarded'} and latest.get('context',{}).get('execution',{}).get('browser_backend')=='playwright':
+                    from .browser_sessions import BrowserSessions
+                    closed=BrowserSessions(self.store.root).close(worker_id)
+                    if closed.get('closed'):
+                        with self.store.connect(write=True) as db:
+                            self.store.event(db,'agent.browser_service_closed',closed,latest.get('job_id'),'scheduler')
+            except Exception:
+                # A saved receipt stays authoritative. Failed cleanup never
+                # restarts the task or touches a different browser owner.
+                pass
+            try:
                 self.schedule()
             except (Conflict, KeyError, RuntimeError):
                 pass

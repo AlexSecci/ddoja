@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 
 PLAYWRIGHT_SERVER = "playwright"
 PLAYWRIGHT_TOOLS = ["browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_fill_form", "browser_type",
@@ -40,9 +41,17 @@ def playwright_args(root, worker):
               "outputDir": str(folder / "output")}
     path = folder / "config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
+    from .efficiency_features import features
+    persistent=features(root)['persistent_browser']
+    if persistent:
+        from .browser_sessions import BrowserSessions
+        BrowserSessions(root).ensure(worker_id,status)
     prefix = "mcp_servers." + PLAYWRIGHT_SERVER
-    args = ["-c", prefix + ".command=" + json.dumps(status["node"]),
-            "-c", prefix + ".args=" + json.dumps([status["cli"], "--config", str(path)]),
+    command=sys.executable if persistent else status['node']
+    command_args=([str(Path(__file__).resolve().parents[1]/'tools/browser_mcp.py'),'--root',str(Path(root).resolve()),
+                   '--worker',worker_id,'--role',worker['role']] if persistent else [status['cli'],'--config',str(path)])
+    args = ["-c", prefix + ".command=" + json.dumps(command),
+            "-c", prefix + ".args=" + json.dumps(command_args),
             "-c", prefix + ".enabled=true", "-c", prefix + ".required=true",
             "-c", prefix + ".startup_timeout_sec=30", "-c", prefix + ".tool_timeout_sec=90",
             "-c", prefix + ".enabled_tools=" + json.dumps(PLAYWRIGHT_TOOLS)]

@@ -1,0 +1,7 @@
+{
+  "persistent_browser": true,
+  "batch_form_edits": true,
+  "compact_worker_context": true,
+  "document_edits": true,
+  "isolated_form_slots": true
+}

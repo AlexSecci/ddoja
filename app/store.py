@@ -3614,8 +3614,11 @@ class Store:
             prompt_files = [self.root / "prompts" / prompt_names[worker["role"]], self.root / "prompts/agent_core.md"]
             if saved_context.get("execution", {}).get("browser_backend") == "playwright":
                 prompt_files.append(self.root / "prompts/browser_playwright.md")
+            from .efficiency_features import features
+            if features(self.root)['compact_worker_context']:
+                prompt_files.extend(self.root/'prompts'/name for name in ('agent_core_compact.md','discovery_playwright.md','submission_playwright.md'))
             instruction_digest = digest("\n".join(path.read_text(encoding="utf-8") for path in prompt_files if path.is_file())
-                                        + json.dumps(self._agent_career_scope(), sort_keys=True))
+                                        + json.dumps(self._agent_career_scope(), sort_keys=True)+json.dumps(features(self.root),sort_keys=True))
             instructions_changed = bool(saved_context.get("instruction_digest") != instruction_digest)
             current_job = db.execute("SELECT jd_version FROM jobs WHERE id=?", (worker["job_id"],)).fetchone() if worker["job_id"] else None
             current_snapshot = (worker["profile_version"] == self.profile_version(db)
@@ -3647,6 +3650,15 @@ class Store:
                        (hashlib.sha256(token.encode("utf-8")).hexdigest(), expiry, timestamp(), worker_id))
         return {"task": task, "capability": token}
 
+    def _agent_isolated_form(self,db,worker):
+        from .efficiency_features import features
+        if worker['role']!='submission' or not features(self.root)['isolated_form_slots']:return False
+        from .worker_settings import desired_execution
+        execution=self._agent_decode(worker['context'],{}).get('execution',{})
+        if not self._context_may_have_sent_final(self._agent_decode(worker['context'],{}),worker['checkpoint']):
+            execution=desired_execution(self.root,db,worker)
+        return execution.get('browser_backend')=='playwright'
+
     def _agent_capacity_wait(self, db, worker):
         """Backpressure is scheduling, never an assessment or a failed job.
 
@@ -3666,10 +3678,13 @@ class Store:
         writer_limit = settings.get("max_concurrent_form_writers", 3)
         if type(writer_limit) is not int or not 1 <= writer_limit <= 3:
             writer_limit = 3
-        if worker["role"] == "submission":
+        if worker["role"] == "submission" and not self._agent_isolated_form(db,worker):
+            from .efficiency_features import features
+            isolate=features(self.root)['isolated_form_slots']
             active_writers = db.execute("SELECT COUNT(*) FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id "
                 "WHERE p.company_id=(SELECT company_id FROM pipelines WHERE id=?) AND w.role='submission' "
-                "AND (w.state='running' OR w.turn_active=1) AND w.id!=?", (worker["pipeline_id"], worker["id"])).fetchone()[0]
+                "AND (w.state='running' OR w.turn_active=1) AND w.id!=? "
+                "AND (?=0 OR COALESCE(json_extract(w.context,'$.execution.browser_backend'),'cua')!='playwright')", (worker["pipeline_id"], worker["id"],int(isolate))).fetchone()[0]
             if active_writers >= writer_limit:
                 return {"reason": "Waiting for this company's active application-form writer.",
                         "active_form_writers": active_writers, "limit": writer_limit}
@@ -3752,7 +3767,7 @@ class Store:
                     recovery_preempts_idle_owner = (circuit and circuit["state"] == "open" and circuit["worker_id"] == worker_id
                         and auth_owner and not auth_owner["turn_active"] and auth_owner["state"] in {"queued", "waiting_browser"}
                         and not self._agent_pending_inbox_wait(db, company_auth["worker_id"]))
-                    if not self._agent_auth_owner_unavailable(db, company_auth) and not recovery_preempts_idle_owner:
+                    if not self._agent_auth_owner_unavailable(db, company_auth) and not recovery_preempts_idle_owner and not self._agent_isolated_form(db,row):
                         return False
             if row["role"] == "discovery":
                 busy = db.execute("SELECT 1 FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id "
@@ -3775,7 +3790,7 @@ class Store:
                 if (not parent or parent["state"] != "waiting_child" or parent["jd_version"] != row["jd_version"]
                         or parent["profile_version"] != row["profile_version"]):
                     return False
-            if row["role"] == "submission" and company_auth and company_auth["state"] == "open" and company_auth["worker_id"] != worker_id:
+            if row["role"] == "submission" and company_auth and company_auth["state"] == "open" and company_auth["worker_id"] != worker_id and not self._agent_isolated_form(db,row):
                 self._agent_transfer_auth_owner(db, company_auth, row)
             now = timestamp()
             from .worker_settings import pin_execution
@@ -3936,6 +3951,12 @@ class Store:
             context["browser_freshness"] = {"pending": True, "epoch": epoch, "issued_at": now,
                 "reason": source, "previous_browser_event_id": last["id"] if last else None,
                 "required_action": "Refresh/reopen the actual job, verify the intended account and saved values, then complete_auth."}
+            if context.get('execution',{}).get('browser_backend')=='playwright':
+                from .browser_sessions import BrowserSessions
+                retained=BrowserSessions(self.root).inspect(worker['id'])
+                context['browser_freshness'].update(browser_generation=retained.get('generation'),
+                    live_state_preserved=retained['state']=='live',
+                    required_action='Inspect the retained owned page first. Verify current account, exact job and saved/unsaved values with a fresh observation, then complete_auth. Reload only if the actual page/session expired or the browser was lost; never replay an uncertain send.')
         db.execute("UPDATE agent_workers SET context=?,updated_at=? WHERE id=?", (json.dumps(context), now, worker["id"]))
         self.event(db, "agent.browser_resume_prepared", {"pipeline_id": worker["pipeline_id"],
                    "worker_id": worker["id"], "epoch": epoch, "source": source,
@@ -4514,6 +4535,39 @@ class Store:
                 valid.append(row["id"])
         return valid
 
+    def _agent_edit_documents(self,db,worker,payload):
+        if worker['role']!='document':raise Conflict('Only the document child can edit its requested documents.')
+        from .efficiency_features import features
+        if not features(self.root)['document_edits']:raise Conflict('Document edits are disabled.')
+        edits=payload.get('edits')
+        if not isinstance(edits,list) or not 1<=len(edits)<=2:raise ValueError('Edit one or two requested documents.')
+        artifacts=[]
+        for edit in edits:
+            identity=str(edit.get('base_source_id',''))
+            if identity.startswith('resume_base:'):
+                source=self._agent_retrieve_sources(db,worker,{'source_ids':[identity]})['sources'][0]
+                markdown=source['content'];sha=source['sha256']
+            elif identity.startswith('artifact:'):
+                row=db.execute('SELECT * FROM agent_artifacts WHERE id=? AND worker_id=? AND kind=? AND jd_version=? AND profile_version=?',
+                    (identity.removeprefix('artifact:'),worker['id'],edit.get('kind'),worker['jd_version'],worker['profile_version'])).fetchone()
+                if not row:raise Conflict('The base artifact is not this child\'s current scoped draft.')
+                path=(self.root/row['path']).resolve()
+                if not path.is_relative_to(self.root/'artifacts/agent'):raise Conflict('The base artifact escaped its package.')
+                markdown=path.read_text(encoding='utf-8');sha=digest(markdown)
+                if sha!=row['sha256']:raise Conflict('The source draft changed outside the recorded artifact.')
+            else:raise ValueError('Use an own artifact:ID or indexed resume_base:ID.')
+            if sha!=edit.get('expected_sha256'):raise Conflict('The source hash changed; retrieve the actual current draft before editing.')
+            replacements=edit.get('replacements')
+            if not isinstance(replacements,list) or not 1<=len(replacements)<=40:raise ValueError('Supply 1–40 exact grouped replacements.')
+            for change in replacements:
+                old,new=change.get('old'),change.get('new')
+                if not isinstance(old,str) or not old or not isinstance(new,str) or markdown.count(old)!=1:
+                    raise Conflict('An edit target is absent or ambiguous; no document version was published.')
+                markdown=markdown.replace(old,new,1)
+            artifacts.append({'kind':edit.get('kind'),'markdown':markdown,
+                'source_notes':{**(edit.get('source_notes') or {}),'edit_base':identity,'edit_base_sha256':sha}})
+        return self._agent_publish_documents(db,worker,{'artifacts':artifacts})
+
     def _agent_publish_documents(self, db, worker, payload):
         if worker["role"] != "document" or not worker["parent_id"] or not worker["job_id"]:
             raise Conflict("Only a scoped document child can publish documents.")
@@ -4942,7 +4996,7 @@ class Store:
                            "lookup_workflow_plan", "save_workflow_plan",
                            "ask_question", "request_documents", "request_approval", "begin_final_action",
                            "finish_submission", "checkpoint"},
-            "document": {"get_context", "retrieve_sources", "ask_question", "publish_documents",
+            "document": {"get_context", "retrieve_sources", "ask_question", "publish_documents", "edit_documents",
                          "record_document_renders", "checkpoint"},
         }
         return action in allowed.get(role, set())
@@ -5170,6 +5224,8 @@ class Store:
                 return self._agent_finish_evaluation(db, worker, payload, decision)
             if action == "request_documents":
                 return self._agent_request_documents(db, worker, payload)
+            if action == 'edit_documents':
+                return self._agent_edit_documents(db,worker,payload)
             if action == "publish_documents":
                 return self._agent_publish_documents(db, worker, payload)
             if action == "record_document_renders":
@@ -5276,7 +5332,13 @@ class Store:
         grouping = db.execute("SELECT value FROM meta WHERE key='browser_grouping'").fetchone()
         page_recovery = db.execute("SELECT value FROM meta WHERE key=?", ("application_error_recovery:" + pipeline["company_id"],)).fetchone()
         email_policy=db.execute("SELECT value FROM meta WHERE key='routine_email_tokens'").fetchone()
+        browser_session={}
+        if self._agent_decode(worker['context'],{}).get('execution',{}).get('browser_backend')=='playwright':
+            from .browser_sessions import BrowserSessions
+            state=BrowserSessions(self.root).inspect(worker['id'])
+            browser_session={'browser_session':{k:state.get(k) for k in ('state','generation','live_state_preserved','worker_id')}}
         return {"quota_paused": quota["paused"], "quota": quota,
+                **browser_session,
                 **({'routine_email_tokens':self._agent_decode(email_policy[0],{})} if email_policy else {}),
                 "browser_freshness": self._agent_decode(worker["context"], {}).get("browser_freshness", {}),
                 "reconciliation_recovery": self._agent_decode(worker["context"], {}).get("reconciliation_recovery", {}),

@@ -212,7 +212,7 @@ class CodexAppServerRuntime:
             return {"disposition": "failed", "error": "The saved session belongs to another transport."}
         choice = self.cli._choice(worker)
         bridge = AgentMCPBridge(worker["id"], capability, "document", self.store.agent_action,
-                                lambda value: render_and_register_documents(self.store, worker["id"], capability, value))
+                                lambda value: render_and_register_documents(self.store, worker["id"], capability, value),root=self.root)
         thread_id = session.removeprefix("app_server:") if session else None
         binding = {"events": queue.Queue(), "ready": threading.Event(), "bridge": bridge, "timing": RunTiming(),
                    "stop": should_stop, "turn_id": None}

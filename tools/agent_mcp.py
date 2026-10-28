@@ -98,7 +98,8 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
     "retrieve_sources": {
         "description": "Retrieve exact applicant source documents or indexed sections by opaque IDs/handles supplied in this worker's scoped applicant index. Up to 16 handles per call. Do not request unrelated sources or disclose their contents in the UI.",
         "inputSchema": _object({"source_ids": {"type": "array", "items": _TEXT,
-                                               "minItems": 1, "maxItems": 16, "uniqueItems": True}}, ("source_ids",)),
+                                               "minItems": 1, "maxItems": 16, "uniqueItems": True},
+                                 "force": {"type":"boolean","description":"Return complete content again if it was lost to conversation compaction."}}, ("source_ids",)),
         "annotations": {"readOnlyHint": True},
     },
     "record_listing": {
@@ -172,6 +173,13 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
             "kind": _ARTIFACT, "markdown": _TEXT, "source_notes": _OBJ,
         }, ("kind", "markdown"))}}, ("artifacts",)),
     },
+    "edit_documents": {
+        "description":"Tailor a current own draft (artifact:ID) or indexed verified resume_base:ID with exact grouped replacements. Supply its source hash; unchanged text is preserved. New immutable PDFs and real preview images are returned for review. Use a full publish only for a new document or a substantial restructuring.",
+        "inputSchema":_object({'edits':{'type':'array','minItems':1,'maxItems':2,'items':_object({
+            'kind':_ARTIFACT,'base_source_id':_TEXT,'expected_sha256':_TEXT,
+            'replacements':{'type':'array','minItems':1,'maxItems':40,'items':_object({'old':_TEXT,'new':_TEXT},('old','new'))},
+            'source_notes':_OBJ},('kind','base_source_id','expected_sha256','replacements'))}},('edits',)),
+    },
     "request_approval": {
         "description": "Create a user-visible checkpoint only when a current action actually requires confirmation, or for first-application review. Routine resume/cover-letter uploads covered by runtime_controls.routine_document_uploads and the exact ready artifact upload_authorization use standing user authorization and do not need this tool. Other files/destinations, binding agreements and CAPTCHAs retain their actual policy gates. Use company_authentication or browser_circuit_recovery for the corresponding recovery gate.",
         "inputSchema": _object({"action": _TEXT, "summary": _TEXT, "observation": _OBJ,
@@ -200,14 +208,14 @@ ROLE_TOOLS: dict[str, tuple[str, ...]] = {
     "submission": ("get_context", "get_browser_guidance", "lookup_listing", "retrieve_sources", "ask_question", "checkpoint", "request_documents",
                    "request_approval", "begin_final_action", "finish_submission", "lookup_workflow_plan",
                    "save_workflow_plan", "browser_control"),
-    "document": ("get_context", "retrieve_sources", "ask_question", "checkpoint", "publish_documents", "save_resume_base"),
+    "document": ("get_context", "retrieve_sources", "ask_question", "checkpoint", "publish_documents", "edit_documents", "save_resume_base"),
 }
 
 
 class AgentMCPBridge:
     def __init__(self, worker_id: str, capability: str, role: str,
                  action_handler: Callable[[str, str, str, dict[str, Any]], Any],
-                 document_renderer: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None):
+                 document_renderer: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None, *, root=None):
         if role not in ROLE_TOOLS:
             raise ValueError("Unknown agent role.")
         if not isinstance(worker_id, str) or not worker_id or not isinstance(capability, str) or not capability:
@@ -216,6 +224,10 @@ class AgentMCPBridge:
         self._capability = capability
         self.role = role
         self._sent_preview_hashes = set()
+        self._served_sources={}
+        from app.efficiency_features import features
+        context_root=root or os.environ.get('AGENT_ROOT')
+        self._compact=bool(context_root and features(context_root)['compact_worker_context'])
         self._action_handler = action_handler
         self._document_renderer = document_renderer
 
@@ -263,7 +275,20 @@ class AgentMCPBridge:
             has_scope = "fact_scope" in arguments
             if has_key != has_scope:
                 raise ValueError("Reusable fact questions must include both fact_key and fact_scope, or neither.")
+        arguments=dict(arguments)
+        force=arguments.pop('force',False) if name=='retrieve_sources' else False
         value = self._action_handler(self.worker_id, self._capability, name, arguments)
+        if self._compact and isinstance(value,dict) and isinstance(value.get('sources'),list):
+            sources=[]
+            for source in value['sources']:
+                fingerprint=hashlib.sha256(json.dumps(source,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+                identity=source.get('id')
+                if not force and self._served_sources.get(identity)==fingerprint:
+                    sources.append({'id':identity,'unchanged_this_invocation':True,'sha256':source.get('sha256'),
+                                    'retrieve_full':'retrieve_sources with force=true if previous content is unavailable'})
+                else:sources.append(source)
+                self._served_sources[identity]=fingerprint
+            value={**value,'sources':sources}
         if name == 'get_context' and self.role in {'submission','discovery'} and os.environ.get('AGENT_ROOT'):
             from app.ephemeral_auth import hint
             instructions=hint(os.environ['AGENT_ROOT'],self.worker_id)
@@ -277,7 +302,7 @@ class AgentMCPBridge:
     def invoke(self, name: str, arguments: Any) -> tuple[dict[str, Any], list[dict[str, str]]]:
         value = self.call(name, arguments)
         image_blocks: list[dict[str, str]] = []
-        if name == "publish_documents" and self._document_renderer:
+        if name in {"publish_documents","edit_documents"} and self._document_renderer:
             rendered = self._document_renderer(value)
             summaries = []
             for item in rendered:

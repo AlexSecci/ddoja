@@ -144,6 +144,8 @@ def render_agent_documents(store, published, *, worker_id: str | None = None):
         raise ValueError("The published document list is inconsistent.")
 
     config = json.loads((CODE_ROOT / "config" / "runtime.json").read_text(encoding="utf-8-sig"))
+    from .efficiency_features import features
+    config['fit_pages']=features(store.root)['document_edits']
     renderer_sha256 = agent_renderer_fingerprint(config)
     rendered_root = (package_root / "rendered").resolve()
     if not rendered_root.is_relative_to(package_root):
@@ -219,6 +221,8 @@ def render_agent_documents(store, published, *, worker_id: str | None = None):
                    str(source), str(target), "--pdftoppm", config["pdftoppm"],
                    "--max-pages", str(max_pages), "--font-regular", config["font_regular"],
                    "--font-bold", config["font_bold"]]
+        from .efficiency_features import features
+        if features(store.root)['document_edits']:command.append('--fit-pages')
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=90)
         if result.returncode:
@@ -283,7 +287,7 @@ def agent_renderer_fingerprint(config: dict | None = None) -> str:
         "dependencies": {key: {"path": str(Path(path).expanduser().resolve()), "sha256": _file_sha256(path)}
                           for key, path in sorted(dependencies.items())},
         "style": {key: config.get(key) for key in ("font_regular", "font_bold")},
-        "formats": {"resume_max_pages": 2, "cover_letter_max_pages": 1, "format": "pdf"},
+        "formats": {"resume_max_pages": 2, "cover_letter_max_pages": 1, "format": "pdf", "fit_pages":config.get('fit_pages',False)},
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
