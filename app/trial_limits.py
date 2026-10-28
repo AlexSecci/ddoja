@@ -5,6 +5,11 @@ import time
 PREFIX = "agent_trial:"
 
 
+def expired(policy):
+    deadline = policy.get('deadline_unix')
+    return deadline is not None and time.time() >= deadline
+
+
 def read(db, pipeline_id):
     row = db.execute("SELECT value FROM meta WHERE key=?", (PREFIX + pipeline_id,)).fetchone()
     return json.loads(row[0]) if row else None
@@ -19,14 +24,23 @@ def allows(db, worker, desired, *, may_have_sent=False):
     policy = read(db, worker["pipeline_id"])
     if not policy:
         return True
-    if policy["state"] != "active" or time.time() >= policy["deadline_unix"] or may_have_sent:
+    if policy["state"] != "active" or expired(policy):
         return False
+    if policy.get('allowed_worker_ids') and worker['id'] not in policy['allowed_worker_ids']:
+        return False
+    if policy.get('allowed_roles') and worker['role'] not in policy['allowed_roles']:
+        return False
+    if may_have_sent:
+        prior = json.loads(worker['context']).get('execution', {})
+        if not (policy.get('reconciliation_allowed') and worker['id'] in policy.get('allowed_worker_ids', [])
+                and prior.get('provider') == policy['provider'] and prior.get('model') == policy['model']):
+            return False
     if desired.get("provider") != policy["provider"] or desired.get("model") != policy["model"]:
         return False
     if worker["role"] != "discovery" and worker["job_id"] not in policy["job_ids"]:
         return False
     records = runs(db, policy)
-    if len(records) >= policy["max_invocations"]:
+    if policy.get('max_invocations') is not None and len(records) >= policy["max_invocations"]:
         return False
     if worker["role"] == "discovery" and sum(r["role"] == "discovery" for r in records) >= policy["max_discovery_invocations"]:
         return False
@@ -34,10 +48,10 @@ def allows(db, worker, desired, *, may_have_sent=False):
 
 
 def stop_reason(db, policy):
-    if time.time() >= policy["deadline_unix"]:
+    if expired(policy):
         return "Supervised trial reached its wall-clock limit."
     active = db.execute("SELECT 1 FROM agent_workers WHERE pipeline_id=? AND turn_active=1 LIMIT 1", (policy["pipeline_id"],)).fetchone()
-    if len(runs(db, policy)) >= policy["max_invocations"] and not active:
+    if policy.get('max_invocations') is not None and len(runs(db, policy)) >= policy["max_invocations"] and not active:
         return "Supervised trial reached its worker-invocation limit."
     placeholders = ','.join('?' for _ in policy["job_ids"])
     remaining = db.execute("SELECT 1 FROM jobs WHERE id IN (" + placeholders + ") AND phase NOT IN ('submitted','discarded') LIMIT 1", policy["job_ids"]).fetchone()

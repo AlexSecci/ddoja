@@ -58,6 +58,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "profile_refresh_supersession",
     "discovery_turn_baseline", "last_context_revision", "browser_wait_scope", "instruction_digest",
     "reconciliation_recovery", "execution", "execution_history", "execution_handoff", "execution_change_deferred",
+    "email_verification_final_scope",
 }
 
 AGENT_DISCOVERY_PROGRESS_FIELDS = {
@@ -3948,9 +3949,9 @@ class Store:
                 raise KeyError(pipeline_id)
             if row["status"] == "completed":
                 raise Conflict("A completed pipeline cannot be resumed.")
-            from .trial_limits import read as read_trial
+            from .trial_limits import read as read_trial, expired
             trial = read_trial(db, pipeline_id)
-            if trial and (trial["state"] != "active" or time.time() >= trial["deadline_unix"]):
+            if trial and (trial["state"] != "active" or expired(trial)):
                 raise Conflict("The bounded trial ended. Prepare fresh limits before resuming this campaign.")
             quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
             if quota.get("paused"):
@@ -3961,9 +3962,13 @@ class Store:
             resume_epoch = uuid.uuid4().hex
             for saved in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND turn_active=0 "
                                     "AND state NOT IN ('completed','discarded','superseded','uncertain','session_missing')", (pipeline_id,)).fetchall():
+                if trial and trial.get('allowed_worker_ids') and saved['id'] not in trial['allowed_worker_ids']:
+                    continue
                 self._agent_prepare_browser_resume(db, saved, resume_epoch, now, "user explicitly resumed this pipeline")
             for worker in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND state IN ('stopped','interrupted','failed','quota_paused')",
                                      (pipeline_id,)).fetchall():
+                if trial and trial.get('allowed_worker_ids') and worker['id'] not in trial['allowed_worker_ids']:
+                    continue
                 context = self._agent_decode(worker["context"], {})
                 if context.get("snapshot_supersession"):
                     continue
@@ -4233,8 +4238,8 @@ class Store:
             # Mail bodies/codes must not be persisted as application evidence.
             # Retain the genuine event's identity, result status and hash so a
             # fresh browser observation can still close the sign-in mutex.
-            if row["role"] == "submission" and db.execute("SELECT 1 FROM meta WHERE key=?",
-                    ("agent_signin_automation:" + row["pipeline_id"],)).fetchone() and db.execute(
+            if row["role"] in {"submission","discovery"} and (db.execute("SELECT 1 FROM meta WHERE key=?",
+                    ("agent_signin_automation:" + row["pipeline_id"],)).fetchone() or db.execute("SELECT 1 FROM meta WHERE key='routine_email_tokens'").fetchone()) and db.execute(
                     "SELECT 1 FROM agent_browser_controls WHERE control_type='company_auth' AND state='open' AND worker_id=?", (worker_id,)).fetchone():
                 raw = json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8")
                 metadata = {"type": event_type, "session_id": session_id or row["session_id"], "tool_name": tool_name,
@@ -4253,6 +4258,9 @@ class Store:
                     safe_url = self._agent_observed_application_url(db, row, event)
                     if safe_url:
                         metadata["observed_application_url"] = safe_url
+                    verification=self._agent_verification_observation(db,row,event)
+                    if verification:
+                        metadata['verification_observation']=verification
                     if success is not None and not success and self._agent_is_input_timeout(event):
                         metadata["browser_input_timeout"] = True
                     if success is not None and not success and self._agent_is_observation_timeout(event):
@@ -5262,7 +5270,9 @@ class Store:
         signin = db.execute("SELECT value FROM meta WHERE key=?", ("agent_signin_automation:" + worker["pipeline_id"],)).fetchone() if worker["role"] == "submission" else None
         grouping = db.execute("SELECT value FROM meta WHERE key='browser_grouping'").fetchone()
         page_recovery = db.execute("SELECT value FROM meta WHERE key=?", ("application_error_recovery:" + pipeline["company_id"],)).fetchone()
+        email_policy=db.execute("SELECT value FROM meta WHERE key='routine_email_tokens'").fetchone()
         return {"quota_paused": quota["paused"], "quota": quota,
+                **({'routine_email_tokens':self._agent_decode(email_policy[0],{})} if email_policy else {}),
                 "browser_freshness": self._agent_decode(worker["context"], {}).get("browser_freshness", {}),
                 "reconciliation_recovery": self._agent_decode(worker["context"], {}).get("reconciliation_recovery", {}),
                 **({"browser_grouping": self._agent_decode(grouping[0], {})} if grouping else {}),
@@ -5319,7 +5329,7 @@ class Store:
         if not worker["job_id"]:
             return None
         job = db.execute("SELECT url,requisition_id FROM jobs WHERE id=?", (worker["job_id"],)).fetchone()
-        if not job or (urlsplit(job["url"]).hostname or "").removeprefix("www.") != "amazon.jobs":
+        if not job or (urlsplit(job["url"]).hostname or "").removeprefix("www.") not in {"amazon.jobs","job-boards.greenhouse.io"}:
             return None
         item = payload.get("transport_event", payload).get("item", {})
         result = item.get("result") or {}
@@ -5340,6 +5350,12 @@ class Store:
         if not isinstance(raw, str):
             return None
         parsed = urlsplit(raw)
+        expected=urlsplit(job['url'])
+        if expected.hostname=='job-boards.greenhouse.io':
+            if (parsed.scheme=='https' and not parsed.username and not parsed.password
+                    and parsed.hostname==expected.hostname and parsed.path.rstrip('/')==expected.path.rstrip('/')):
+                return urlunsplit((parsed.scheme,parsed.netloc,parsed.path,'',''))
+            return None
         if (parsed.scheme != "https" or parsed.username or parsed.password
                 or (parsed.hostname or "").removeprefix("www.") != "amazon.jobs"
                 or not re.search(r"/applicant/jobs/" + re.escape(str(job["requisition_id"])) + r"/(?:apply|summary)/?$", parsed.path)):
@@ -5363,7 +5379,30 @@ class Store:
                 or not (item.get("server") == "cua_repl" and item.get("tool") == "js" or item.get("server") == "playwright")):
             return None
         return {"event_id": row["id"], "session_id": row["session_id"],
-                "application_url": self._agent_observed_application_url(db, worker, payload)}
+                "application_url": self._agent_observed_application_url(db, worker, payload),
+                "verification": payload.get('verification_observation') or self._agent_verification_observation(db,worker,payload)}
+
+    def _agent_verification_observation(self,db,worker,payload):
+        url=self._agent_observed_application_url(db,worker,payload)
+        if not url or urlsplit(url).hostname!='job-boards.greenhouse.io':
+            return None
+        item=payload.get('transport_event',payload).get('item',{})
+        blocks=(item.get('result') or {}).get('content',[])
+        for block in blocks:
+            text=block.get('text','') if isinstance(block,dict) else ''
+            if '### Snapshot' not in text:
+                continue
+            snapshot=text.split('### Snapshot',1)[1]
+            if 'enter the 8-character code to confirm' not in snapshot:
+                continue
+            group=snapshot.split('enter the 8-character code to confirm',1)[1]
+            button=re.search(r'(?m)^\s*- button "Submit application"([^\n]*)',group)
+            if not button:
+                continue
+            fields=group[:button.start()]
+            count=len(re.findall(r'(?m)^\s*- textbox(?: "Security code")? \[[^\n]+?\]: (?:"[A-Za-z0-9]"|[A-Za-z0-9])\s*$',fields))
+            return {'present':True,'filled_boxes':count,'submit_enabled':'[disabled]' not in button.group(1)}
+        return None
 
     def _agent_scope_isolated_tab_approval(self, db, worker_id):
         """Keep an isolated job retry actionable without tying it to a later global outage."""
@@ -6246,19 +6285,32 @@ class Store:
         return result
 
     def _agent_begin_final_action(self, db, worker, payload):
-        from .trial_limits import read as read_trial
+        from .trial_limits import read as read_trial, expired
         trial = read_trial(db, worker["pipeline_id"])
-        if trial and (trial["state"] != "active" or time.time() >= trial["deadline_unix"] or worker["job_id"] not in trial["job_ids"]):
+        if trial and (trial["state"] != "active" or expired(trial) or worker["job_id"] not in trial["job_ids"]):
             raise Conflict("The bounded trial does not authorize another final application action.")
-        if db.execute("SELECT 1 FROM agent_browser_controls WHERE state='open' AND scope_key IN (?,?)",
-                      (self._agent_connector_scope(worker), "company:" + worker["company_id"])).fetchone():
+        from .ephemeral_auth import permitted_final
+        email_verification=permitted_final(self,db,worker)
+        gates=db.execute("SELECT * FROM agent_browser_controls WHERE state='open' AND scope_key IN (?,?)",
+                      (self._agent_connector_scope(worker), "company:" + worker["company_id"])).fetchall()
+        if any(not(email_verification and gate['control_type']=='company_auth' and gate['worker_id']==worker['id']) for gate in gates):
             raise Conflict("Authentication or connector recovery is still pending; final action cannot start.")
         if worker["role"] != "submission" or not worker["job_id"]:
             raise Conflict("Only a scoped submission worker can begin its final application action.")
         if worker["stop_requested"]:
             raise Conflict("Pipeline stop was recorded before the final application action.")
-        if self._agent_decode(worker["context"], {}).get("browser_freshness", {}).get("pending"):
-            raise Conflict("The saved application page may have expired. Refresh its browser/account session before final action.")
+        current_context=self._agent_decode(worker['context'],{})
+        freshness=current_context.get('browser_freshness',{})
+        if freshness.get('pending'):
+            observation=self._agent_latest_cua_event(db,worker,success=True) if email_verification else None
+            job_url=db.execute('SELECT url FROM jobs WHERE id=?',(worker['job_id'],)).fetchone()
+            observed_at=db.execute('SELECT created_at FROM agent_runtime_events WHERE id=?',(observation['event_id'],)).fetchone() if observation else None
+            if not (observation and job_url and observation.get('application_url')==job_url[0]
+                    and observed_at and observed_at[0]>=freshness.get('issued_at','')):
+                raise Conflict("The saved application page may have expired. Refresh its browser/account session before final action.")
+            freshness.update(pending=False,confirmed_at=timestamp(),evidence_id=observation['event_id'])
+            current_context['browser_freshness']=freshness
+            db.execute('UPDATE agent_workers SET context=? WHERE id=?',(json.dumps(current_context),worker['id']))
         job = db.execute("SELECT jd_version,phase FROM jobs WHERE id=?", (worker["job_id"],)).fetchone()
         profile_version = self.profile_version(db)
         if not job or job["jd_version"] != worker["jd_version"] or profile_version != worker["profile_version"]:
@@ -6284,9 +6336,17 @@ class Store:
             if review_context.get("ready_artifacts", []) != current_artifacts:
                 raise Conflict("The first-application review no longer matches the current prepared documents.")
             review_id = review["id"]
-        context = self._agent_decode(worker["context"], {})
+        context = current_context
         if context.get("final_action_may_have_been_sent") or self._context_may_have_sent_final(context, worker["checkpoint"]):
-            raise Conflict("A final action may already have started; reconcile it instead of authorizing another click.")
+            from .ephemeral_auth import final_scope
+            scope=final_scope(self.root,worker['id']) if email_verification else None
+            observation=self._agent_latest_cua_event(db,worker,success=True) if scope else None
+            verified=(observation or {}).get('verification') or {}
+            if not (scope and context.get('email_verification_final_scope')!=scope and verified.get('present')
+                    and verified.get('filled_boxes')==8 and verified.get('submit_enabled')):
+                raise Conflict("A final action may already have started; reconcile it instead of authorizing another click.")
+            context['email_verification_final_scope']=scope
+            self.event(db,'agent.email_verification_continuation_authorized',{'worker_id':worker['id'],'scope':scope,'browser_event_id':observation['event_id']},worker['job_id'],'agent_runtime')
         context["final_action_may_have_been_sent"] = True
         context["final_action_authorized_at"] = timestamp()
         context["final_action_review_item_id"] = review_id

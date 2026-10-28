@@ -112,3 +112,18 @@ def test_live_trial_stop_check_keeps_active_turn_running_then_obeys_deadline(tmp
         assert manager._stopping(discovery['id'], pipeline['id']) is True
     finally:
         manager.shutdown()
+
+
+def test_completion_only_run_has_no_time_cutoff_but_cannot_start_other_tasks(tmp_path):
+    store,pipeline,discovery,jobs=prepared(tmp_path)
+    store.configure_agent_trial(pipeline['id'],jobs[:1])
+    evaluator=next(w for w in store.list_agent_workers(pipeline['id']) if w['role']=='evaluator' and w['job_id']==jobs[0])
+    with store.connect(write=True) as db:
+        key='agent_trial:'+pipeline['id']
+        policy=json.loads(db.execute('SELECT value FROM meta WHERE key=?',(key,)).fetchone()[0])
+        policy.update(deadline_unix=None,max_invocations=None,max_discovery_invocations=0,allowed_worker_ids=[evaluator['id']],allowed_roles=['evaluator'])
+        db.execute('UPDATE meta SET value=? WHERE key=?',(json.dumps(policy),key))
+    store.resume_agent_pipeline(pipeline['id'])
+    assert not store.reserve_agent_worker(discovery['id'])
+    assert store.reserve_agent_worker(evaluator['id'])
+    assert store.agent_trial_stop_reason(pipeline['id']) is None

@@ -539,7 +539,8 @@ class AgentPipelineManager:
             if self.store.agent_pipeline_stop_requested(pipeline_id):
                 return True
             trial = self.store.get_agent_trial(pipeline_id)
-            if trial and (trial["state"] != "active" or time.time() >= trial["deadline_unix"]):
+            from .trial_limits import expired
+            if trial and (trial["state"] != "active" or expired(trial)):
                 return True
             state = self.store.get_agent_worker(worker_id)["state"]
             # Agent actions such as finish_evaluation/finish_submission commit

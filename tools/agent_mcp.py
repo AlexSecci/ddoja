@@ -263,7 +263,16 @@ class AgentMCPBridge:
             has_scope = "fact_scope" in arguments
             if has_key != has_scope:
                 raise ValueError("Reusable fact questions must include both fact_key and fact_scope, or neither.")
-        return self._action_handler(self.worker_id, self._capability, name, arguments)
+        value = self._action_handler(self.worker_id, self._capability, name, arguments)
+        if name == 'get_context' and self.role in {'submission','discovery'} and os.environ.get('AGENT_ROOT'):
+            from app.ephemeral_auth import hint
+            instructions=hint(os.environ['AGENT_ROOT'],self.worker_id)
+            if instructions:
+                value['email_token_retrieval']=instructions
+        if name=='checkpoint' and self.role in {'submission','discovery'} and arguments.get('checkpoint')=='awaiting_email_token_handoff' and os.environ.get('AGENT_ROOT'):
+            from app.ephemeral_auth import wait_for_handoff
+            value['authentication_handoff']=wait_for_handoff(os.environ['AGENT_ROOT'],self.worker_id)
+        return value
 
     def invoke(self, name: str, arguments: Any) -> tuple[dict[str, Any], list[dict[str, str]]]:
         value = self.call(name, arguments)
