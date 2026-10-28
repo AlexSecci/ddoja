@@ -32,3 +32,24 @@ foreach ($bad in @('2026-10-27T19:27:24', [DateTime]::new(2026,10,27,19,27,24)))
     values = json.loads(result.stdout)
     assert values["offsets"] == [0] * 6
     assert values["rejected"] == 2
+
+
+def test_restart_recognizes_windows_console_helper_but_rejects_unknown_children():
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("PowerShell is required for the Windows restart regression.")
+    script = r'''
+. ./tools/server_process_identity.ps1
+$runtime = [pscustomobject]@{Name='python.exe'; CommandLine='python.exe -m uvicorn app.server:create_app --factory'; ExecutablePath='C:\runtime\python.exe'; ProcessId=123}
+$console = [pscustomobject]@{Name='conhost.exe'; CommandLine='conhost.exe 0x4'; ExecutablePath=(Join-Path $env:SystemRoot 'System32\conhost.exe'); ProcessId=456}
+$unknown = [pscustomobject]@{Name='python.exe'; CommandLine='python.exe other.py'; ExecutablePath='C:\runtime\python.exe'; ProcessId=789}
+$result = Get-DashboardRuntimeChild -Children @($runtime,$console)
+$rejected = 0
+try { Get-DashboardRuntimeChild -Children @($runtime,$console,$unknown) | Out-Null } catch { $rejected++ }
+try { Get-DashboardRuntimeChild -Children @($runtime,$runtime) | Out-Null } catch { $rejected++ }
+@{ selected=$result.ProcessId; rejected=$rejected } | ConvertTo-Json -Compress
+'''
+    result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", script], cwd=ROOT,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"selected": 123, "rejected": 2}

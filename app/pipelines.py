@@ -357,6 +357,28 @@ class AgentPipelineManager:
         self._shutdown_event = threading.Event()
         self._scheduling = False
         self._schedule_requested = False
+        self._trial_monitor = None
+
+    def _ensure_trial_monitor(self):
+        if self._trial_monitor is not None or self._shutdown or not self.store.active_agent_trials():
+            return
+        with self._lock:
+            if self._trial_monitor is None and not self._shutdown:
+                self._trial_monitor = threading.Thread(target=self._monitor_trials, name="bounded-agent-trials", daemon=True)
+                self._trial_monitor.start()
+
+    def _monitor_trials(self):
+        while not self._shutdown_event.wait(1):
+            try:
+                for policy in self.store.active_agent_trials():
+                    reason = self.store.agent_trial_stop_reason(policy["pipeline_id"])
+                    if reason:
+                        self.stop(policy["pipeline_id"])
+                        self.store.close_agent_trial(policy["pipeline_id"], reason)
+            except Exception:
+                # Admission and final-action checks enforce limits even if this
+                # independent stop loop encounters a temporary database lock.
+                continue
 
     def pipeline_view(self, pipeline_id):
         pipeline = self.store.get_pipeline(pipeline_id)
@@ -367,7 +389,9 @@ class AgentPipelineManager:
         worker_fields = ("id", "parent_id", "pipeline_id", "job_id", "role", "state", "session_id",
                          "resume_mode", "checkpoint", "error", "provider_error", "updated_at",
                          "turn_active", "jd_version", "profile_version")
-        workers = [{key: worker.get(key) for key in worker_fields} for worker in full_workers]
+        workers = [{**{key: worker.get(key) for key in worker_fields},
+                    "context": {key: worker.get("context", {}).get(key) for key in ("execution", "execution_change_deferred")
+                                if key in worker.get("context", {})}} for worker in full_workers]
         counts = pipeline.get("counts", {})
         return {"pipeline": pipeline, "workers": workers, "counts": counts,
                 "limits": dict(self.limits) if pipeline.get("mode") == "agentic" else {},
@@ -441,6 +465,7 @@ class AgentPipelineManager:
         return self.store.recover_interrupted_agent_workers()
 
     def schedule(self):
+        self._ensure_trial_monitor()
         with self._lock:
             if self._shutdown:
                 return 0
@@ -511,6 +536,9 @@ class AgentPipelineManager:
             return True
         try:
             if self.store.agent_pipeline_stop_requested(pipeline_id):
+                return True
+            trial = self.store.get_agent_trial(pipeline_id)
+            if trial and (trial["state"] != "active" or time.time() >= trial["deadline_unix"]):
                 return True
             state = self.store.get_agent_worker(worker_id)["state"]
             # Agent actions such as finish_evaluation/finish_submission commit

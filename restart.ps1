@@ -15,11 +15,9 @@ if (Test-Path -LiteralPath $recordPath) {
             throw 'Saved PID no longer identifies this dashboard. No process was stopped.'
         }
         $serverChildren = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($serverRecord.pid)")
-        if ($serverChildren.Count -ne 1 -or $serverChildren[0].CommandLine -notmatch 'uvicorn app.server:create_app') {
-            throw 'Unexpected process tree. No process was stopped.'
-        }
-        Stop-Process -Id $serverChildren[0].ProcessId
-        Wait-Process -Id $serverChildren[0].ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+        $serverRuntime = Get-DashboardRuntimeChild -Children $serverChildren
+        Stop-Process -Id $serverRuntime.ProcessId
+        Wait-Process -Id $serverRuntime.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
         Stop-Process -Id $serverParent.ProcessId -ErrorAction SilentlyContinue
     }
 }

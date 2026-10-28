@@ -48,3 +48,9 @@ Actual Playwright MCP results feed the same listing-capture, approval evidence, 
 ```
 
 It uses a separate synthetic database and browser profile, never the production campaign ledger, and writes its report under `data/provider-smoke/`. No employer receives an application.
+
+## Supervised live trials
+
+An operator can prepare persistent limits with `Store.configure_agent_trial(pipeline_id, job_ids, seconds=900, max_invocations=12, max_discovery_invocations=1)`. This does not resume a campaign. Admission is restricted to the listed jobs (including their document children), the discovery-turn allowance, and DeepSeek Flash. Possibly sent applications cannot enter a new-provider trial. Old queue backlog does not throttle the admitted trial, while normal concurrency and form-writer limits remain in force.
+
+The scheduler counts reserved invocations atomically and rejects launches beyond the budget or deadline. A local watchdog stops the campaign when time expires, the invocation budget is exhausted with no active turn, or all trial jobs reach terminal results. Final-send authorization also checks the deadline. Other campaign jobs remain queued. Trial state and counts are available in the campaign runtime-status response. An ended trial remains held until an operator prepares fresh limits; a generic Resume cannot silently broaden the run. None of these controls grant inbox approvals or replay an uncertain send.

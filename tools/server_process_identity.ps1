@@ -14,3 +14,17 @@ function ConvertTo-DashboardUtc {
     }
     return [DateTimeOffset]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
 }
+
+function Get-DashboardRuntimeChild {
+    param([Parameter(Mandatory)][object[]]$Children)
+    $runtime = @($Children | Where-Object {
+        $_.Name -eq 'python.exe' -and $_.CommandLine -match '-m\s+uvicorn\s+app\.server:create_app\b'
+    })
+    $unexpected = @($Children | Where-Object {
+        $_ -notin $runtime -and $_.ExecutablePath -ne (Join-Path $env:SystemRoot 'System32\conhost.exe')
+    })
+    if ($runtime.Count -ne 1 -or $unexpected.Count -gt 0) {
+        throw 'Unexpected process tree. No process was stopped.'
+    }
+    return $runtime[0]
+}

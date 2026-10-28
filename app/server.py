@@ -492,6 +492,7 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     @app.get("/api/pipelines/{pipeline_id}/runtime-status")
     def runtime_status(pipeline_id: str):
         status = store.agent_runtime_status(pipeline_id)
+        status["trial"] = store.get_agent_trial(pipeline_id)
         status["execution_host"] = (execution_host.status() if execution_host is not None else
                                     {"mode": "injected", "status": "unverified",
                                      "detail": "A custom runtime factory is configured."})

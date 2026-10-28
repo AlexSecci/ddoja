@@ -72,6 +72,60 @@ class Conflict(ValueError):
 
 
 class Store:
+    def configure_agent_trial(self, pipeline_id, job_ids, *, seconds=900, max_invocations=12, max_discovery_invocations=1):
+        from .trial_limits import PREFIX
+        if (not isinstance(job_ids, list) or not 1 <= len(job_ids) <= 3 or len(set(job_ids)) != len(job_ids)
+                or type(seconds) is not int or not 30 <= seconds <= 1800
+                or type(max_invocations) is not int or not 1 <= max_invocations <= 30
+                or type(max_discovery_invocations) is not int or not 0 <= max_discovery_invocations <= 1):
+            raise ValueError("Invalid bounded trial limits.")
+        with self.connect(write=True) as db:
+            pipeline = db.execute("SELECT * FROM pipelines WHERE id=? AND mode='agentic'", (pipeline_id,)).fetchone()
+            if not pipeline or pipeline["status"] == "completed":
+                raise Conflict("A bounded trial requires an unfinished agentic campaign.")
+            if db.execute("SELECT 1 FROM agent_workers WHERE pipeline_id=? AND turn_active=1", (pipeline_id,)).fetchone():
+                raise Conflict("Prepare trial limits only while workers are stopped.")
+            for job_id in job_ids:
+                if not db.execute("SELECT 1 FROM pipeline_jobs p JOIN jobs j ON j.id=p.job_id WHERE p.pipeline_id=? AND p.job_id=? AND p.selected=1 AND j.phase NOT IN ('submitted','discarded')", (pipeline_id, job_id)).fetchone():
+                    raise Conflict("Each trial job must be selected and unfinished in this campaign.")
+                for worker in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND job_id=? AND role='submission'", (pipeline_id, job_id)):
+                    if self._context_may_have_sent_final(self._agent_decode(worker["context"], {}), worker["checkpoint"]):
+                        raise Conflict("A possibly sent application cannot enter a new-provider trial.")
+            now = time.time()
+            policy = {"state": "active", "pipeline_id": pipeline_id, "job_ids": job_ids, "provider": "deepseek", "model": "deepseek-flash",
+                      "started_at": timestamp(), "deadline_unix": now + seconds, "max_invocations": max_invocations,
+                      "max_discovery_invocations": max_discovery_invocations,
+                      "execution_watermark": db.execute("SELECT COALESCE(MAX(rowid),0) FROM agent_execution_runs").fetchone()[0]}
+            db.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (PREFIX + pipeline_id, json.dumps(policy)))
+            self.event(db, "agent.trial_configured", policy, actor="user")
+            return policy
+
+    def get_agent_trial(self, pipeline_id):
+        from .trial_limits import read, runs
+        with self.connect() as db:
+            policy = read(db, pipeline_id)
+            return {**policy, "invocations": len(runs(db, policy))} if policy else None
+
+    def active_agent_trials(self):
+        from .trial_limits import PREFIX
+        with self.connect() as db:
+            return [json.loads(r[0]) for r in db.execute("SELECT value FROM meta WHERE key LIKE ?", (PREFIX + '%',)) if json.loads(r[0]).get("state") == "active"]
+
+    def agent_trial_stop_reason(self, pipeline_id):
+        from .trial_limits import read, stop_reason
+        with self.connect() as db:
+            policy = read(db, pipeline_id)
+            return stop_reason(db, policy) if policy and policy["state"] == "active" else None
+
+    def close_agent_trial(self, pipeline_id, reason):
+        from .trial_limits import PREFIX, read
+        with self.connect(write=True) as db:
+            policy = read(db, pipeline_id)
+            if policy and policy["state"] == "active":
+                policy.update(state="ended", ended_at=timestamp(), stop_reason=reason)
+                db.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps(policy), PREFIX + pipeline_id))
+                self.event(db, "agent.trial_ended", policy, actor="agent_scheduler")
+
     def get_worker_settings(self):
         from .worker_settings import read_settings, model_catalog, ROLE_LABELS
         from .provider_credentials import ProviderCredentials
@@ -3621,6 +3675,13 @@ class Store:
         if db.execute("SELECT 1 FROM agent_browser_controls WHERE state='open' AND worker_id=?",
                       (worker["id"],)).fetchone():
             return None
+        # Queued work outside a bounded trial must not deadlock its admitted
+        # discovery/evaluations through ordinary upstream backlog throttling.
+        # The company form-writer limit above and role caps still apply.
+        from .trial_limits import read as read_trial
+        trial = read_trial(db, worker["pipeline_id"])
+        if trial and trial["state"] == "active":
+            return None
         approved_limit = settings.get("max_approved_backlog", 6)
         discovery_limit = settings.get("max_discovery_backlog", 12)
         if type(approved_limit) is not int or not 3 <= approved_limit <= 100:
@@ -3660,6 +3721,12 @@ class Store:
             if row["state"] != "queued" or row["mode"] != "agentic" or row["stop_requested"]:
                 return False
             if row["pipeline_status"] in {"stopped", "stopping", "completed"}:
+                return False
+            from .trial_limits import allows as trial_allows
+            from .worker_settings import desired_execution
+            trial_desired = desired_execution(self.root, db, row)
+            if not trial_allows(db, row, trial_desired,
+                    may_have_sent=self._context_may_have_sent_final(self._agent_decode(row["context"], {}), row["checkpoint"])):
                 return False
             quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
             if quota.get("paused"):
@@ -3881,6 +3948,10 @@ class Store:
                 raise KeyError(pipeline_id)
             if row["status"] == "completed":
                 raise Conflict("A completed pipeline cannot be resumed.")
+            from .trial_limits import read as read_trial
+            trial = read_trial(db, pipeline_id)
+            if trial and (trial["state"] != "active" or time.time() >= trial["deadline_unix"]):
+                raise Conflict("The bounded trial ended. Prepare fresh limits before resuming this campaign.")
             quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
             if quota.get("paused"):
                 raise Conflict("Clear the account quota latch with the explicit quota-resume action first.")
@@ -6175,6 +6246,10 @@ class Store:
         return result
 
     def _agent_begin_final_action(self, db, worker, payload):
+        from .trial_limits import read as read_trial
+        trial = read_trial(db, worker["pipeline_id"])
+        if trial and (trial["state"] != "active" or time.time() >= trial["deadline_unix"] or worker["job_id"] not in trial["job_ids"]):
+            raise Conflict("The bounded trial does not authorize another final application action.")
         if db.execute("SELECT 1 FROM agent_browser_controls WHERE state='open' AND scope_key IN (?,?)",
                       (self._agent_connector_scope(worker), "company:" + worker["company_id"])).fetchone():
             raise Conflict("Authentication or connector recovery is still pending; final action cannot start.")
