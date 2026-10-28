@@ -201,6 +201,7 @@
         <button id="deepseek-key-remove" type="button" class="quiet-button">Remove saved key</button>
       </section>
       <section class="panel"><h3>Playwright browser</h3><p id="playwright-readiness" class="hint">Checking installation…</p><p class="hint">Playwright uses a persistent browser profile for each worker, separate from your personal Chrome sessions. Existing sign-ins and saved passwords in personal Chrome are not shared. Native Chrome/CUA remains available for Codex workers.</p></section>
+      <section class="panel"><h3>Email verification broker</h3><p id="gmail-broker-status" class="hint">Checking connection…</p><p class="hint">Optional Gmail read-only OAuth retrieves fresh verification mail for the current owned application. Configure locally with .venv\Scripts\python.exe tools\configure_gmail_broker.py --client-file YOUR_PRIVATE_DESKTOP_CLIENT_JSON. Credentials are encrypted for this Windows user. Required application approvals remain in the inbox.</p></section>
     </section>
 
     <section id="detail" class="detail-panel hidden" aria-labelledby="detail-title">

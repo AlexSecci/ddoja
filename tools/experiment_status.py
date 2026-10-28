@@ -42,6 +42,13 @@ def status():
                            "COALESCE(SUM(COALESCE(u.delta_cached_input_tokens,u.cached_input_tokens)),0),"
                            "COALESCE(SUM(COALESCE(u.delta_output_tokens,u.output_tokens)),0) FROM agent_usage u JOIN agent_workers w ON w.id=u.worker_id "
                            "WHERE u.rowid>? AND w.pipeline_id=?", (watermark["agent_usage"], pid)).fetchone()
+        provider_usage=None
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='agent_provider_requests'").fetchone():
+            counts=db.execute('SELECT COUNT(*),COUNT(r.input_tokens),COALESCE(SUM(r.input_tokens),0),COALESCE(SUM(r.cached_input_tokens),0),COALESCE(SUM(r.output_tokens),0) FROM agent_provider_requests r JOIN agent_workers w ON w.id=r.worker_id WHERE r.rowid>? AND w.pipeline_id=?',
+                              (watermark.get('agent_provider_requests',0),pid)).fetchone()
+            provider_usage=dict(zip(('requests','measured_requests','input_tokens','cached_input_tokens','output_tokens'),counts))
+            provider_usage['missing_usage_requests']=counts[0]-counts[1]
+            provider_usage['cache_hit_fraction']=counts[3]/counts[2] if counts[2] else None
         batch_count = db.execute("SELECT COUNT(*) FROM events WHERE rowid>? AND kind='agent.inbox_batch_decided' "
                                  "AND json_extract(payload,'$.pipeline_id')=?", (watermark["events"], pid)).fetchone()[0]
         live = [dict(r) for r in db.execute("SELECT id,role,state,session_id,checkpoint,turn_active,updated_at "
@@ -53,6 +60,7 @@ def status():
             "new_submission_results": receipts, "human_approval_batches": batch_count,
             "quota_paused": json.loads(quota_row[0]).get("paused", False) if quota_row else False,
             "usage_delta": dict(zip(("turns", "input_tokens", "cached_input_tokens", "output_tokens"), usage)),
+            "provider_response_delta":provider_usage,
             "timing": timing}
 
 

@@ -42,7 +42,13 @@ def playwright_args(root, worker):
     path = folder / "config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
     from .efficiency_features import features
-    persistent=features(root)['persistent_browser']
+    context=worker.get('context',{})
+    if isinstance(context,str):context=json.loads(context)
+    settings=features(root)
+    if context.get('instruction_contract_id'):
+        from .worker_contracts import load
+        settings=load(root,worker_id,context['instruction_contract_id'])['features']
+    persistent=settings['persistent_browser']
     if persistent:
         from .browser_sessions import BrowserSessions
         registry=BrowserSessions(root)
@@ -56,6 +62,8 @@ def playwright_args(root, worker):
     command=sys.executable if persistent else status['node']
     command_args=([str(Path(__file__).resolve().parents[1]/'tools/browser_mcp.py'),'--root',str(Path(root).resolve()),
                    '--worker',worker_id,'--role',worker['role']] if persistent else [status['cli'],'--config',str(path)])
+    if persistent and context.get('instruction_contract_id'):
+        command_args += ['--contract', context['instruction_contract_id']]
     args = ["-c", prefix + ".command=" + json.dumps(command),
             "-c", prefix + ".args=" + json.dumps(command_args),
             "-c", prefix + ".enabled=true", "-c", prefix + ".required=true",

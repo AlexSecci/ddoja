@@ -1755,6 +1755,14 @@ function renderEfficiency() {
     ['Awaiting user (union of waits)', report.human_wait_seconds ?? totals.human_wait_seconds, ' s'],
   ].forEach(([label, value, suffix]) => nodes.push(efficiencyCard(label, value, suffix || '')));
   const cache = report.cache || {};
+  const requests = report.provider_requests || {};
+  if (requests.requests) {
+    nodes.push(efficiencyCard('Measured provider responses', requests.measured_requests));
+    nodes.push(efficiencyCard('Provider responses missing usage', requests.missing_usage_requests));
+    nodes.push(efficiencyCard('Provider cache hit rate', requests.cache_hit_fraction == null ? 'Unavailable' : (100 * requests.cache_hit_fraction).toFixed(1) + '%'));
+    nodes.push(efficiencyCard('Measured DeepSeek cost at peak rates', '$' + Number(requests.peak_cost_estimate_usd || 0).toFixed(4)));
+    nodes.push(element('p', 'Provider response counters replace covered CLI turn counters; they are not added twice. Cost excludes supervisor work. Off-peak token prices are half.', 'sub'));
+  }
   const timing = report.timing || {};
   [
     ['Browser tool time (measured worker seconds)', timing.browser_tool_seconds],

@@ -1,0 +1,5 @@
+{
+  "context_handoff_input_tokens": 90000,
+  "email_handoff_wait_seconds": 90,
+  "broker_lookup_seconds": 20
+}

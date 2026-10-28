@@ -53,6 +53,10 @@ async function loadWorkerSettings({ discardDraft = false } = {}) {
   settingsBusy = true;
   try {
     workerSettings = await api('settings/workers'); settingsDirty = false; renderWorkerSettings();
+    try {
+      const broker = await api('settings/gmail-broker');
+      settingsNode('gmail-broker-status').textContent = broker.configured ? 'Configured · Gmail read-only OAuth. Matching email tokens are retrieved in the background.' : 'Not configured · scoped retrieval through the Codex supervisor remains available.';
+    } catch { settingsNode('gmail-broker-status').textContent = 'Connection status unavailable. Worker settings remain available.'; }
     settingsMessage('Saved revision ' + workerSettings.revision + '.');
   } catch (error) { settingsMessage(error.message); }
   finally { settingsBusy = false; }

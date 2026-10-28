@@ -14,13 +14,16 @@ from app.efficiency_features import features
 
 
 class BrowserBridge:
-    def __init__(self,root,worker_id,role):
+    def __init__(self,root,worker_id,role,contract_id=None):
         self.root=Path(root);self.worker_id=worker_id;self.role=role
         self.settings=features(root)
+        if contract_id:
+            from app.worker_contracts import load
+            self.settings = load(root,worker_id,contract_id)['features']
         session=BrowserSessions(root).inspect(worker_id)
         if session['state']!='live':raise RuntimeError('The owned browser service is unavailable. Request host recovery; do not start a replacement from this CLI.')
         self.rpc=BrowserRPC(session['endpoint'])
-        self.catalog=[t for t in self.rpc.tools() if t['name'] in PLAYWRIGHT_TOOLS]
+        self.catalog=sorted([t for t in self.rpc.tools() if t['name'] in PLAYWRIGHT_TOOLS],key=lambda t:t['name'])
         if self.settings['batch_form_edits'] and role=='submission':
             self.catalog=copy.deepcopy(self.catalog)
             for tool in self.catalog:
@@ -29,6 +32,21 @@ class BrowserBridge:
                     tool['inputSchema']['properties'].update(
                         expected_url={'type':'string','description':'Optional exact URL from the current observation; mismatch stops before editing.'},
                         observe_target={'type':'string','description':'Optional observed form/section target for the returned snapshot; omit for the complete page.'})
+        if contract_id:
+            path=self.root/'data/worker-contracts'/worker_id/(contract_id+'.browser.json')
+            from app.worker_contracts import encoded
+            import hashlib
+            if path.exists():
+                saved=json.loads(path.read_text(encoding='utf-8'))
+                catalog=saved['tools']
+                if saved['sha256'] != hashlib.sha256(encoded(catalog).encode()).hexdigest():
+                    raise ValueError('Pinned browser catalog changed on disk.')
+                if not {t['name'] for t in catalog} <= set(PLAYWRIGHT_TOOLS):
+                    raise ValueError('Pinned browser catalog contains an unsupported tool.')
+                self.catalog=catalog
+            else:
+                saved={'tools':self.catalog,'sha256':hashlib.sha256(encoded(self.catalog).encode()).hexdigest()}
+                temp=path.with_suffix('.tmp');temp.write_text(encoded(saved),encoding='utf-8');temp.replace(path)
 
     def tools(self):return self.catalog
 
@@ -78,7 +96,7 @@ def serve(bridge):
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--worker',required=True);parser.add_argument('--role',required=True)
-    args=parser.parse_args();bridge=BrowserBridge(args.root,args.worker,args.role)
+    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--worker',required=True);parser.add_argument('--role',required=True);parser.add_argument('--contract')
+    args=parser.parse_args();bridge=BrowserBridge(args.root,args.worker,args.role,args.contract)
     try:serve(bridge)
     finally:bridge.rpc.close()

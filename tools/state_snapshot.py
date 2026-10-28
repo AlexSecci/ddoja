@@ -39,6 +39,8 @@ def snapshot(label, pipeline_id):
         state = {key: [dict(r) for r in db.execute(q, params)] for key, (q, params) in queries.items()}
         watermarks = {table: db.execute("SELECT COALESCE(MAX(rowid),0) FROM "+table).fetchone()[0]
                       for table in ("events", "agent_usage", "agent_runtime_events", "agent_submission_results", "agent_artifacts")}
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='agent_provider_requests'").fetchone():
+            watermarks['agent_provider_requests']=db.execute('SELECT COALESCE(MAX(rowid),0) FROM agent_provider_requests').fetchone()[0]
         active = db.execute("SELECT COUNT(*) FROM agent_workers WHERE turn_active=1 OR state='running'").fetchone()[0]
         state.update({"snapshot_at_utc": now.isoformat(), "pipeline": pipeline, "watermarks": watermarks,
                       "profile_version": store.profile_version(db), "active_workers": active})

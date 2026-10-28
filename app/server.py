@@ -51,6 +51,10 @@ class ProviderKeyInput(Strict):
     api_key: str = Field(min_length=1, max_length=4096, repr=False)
 
 
+class HandoffWakeInput(Strict):
+    request_id: str = Field(min_length=1,max_length=100)
+
+
 class CompanyInput(Strict):
     id: str
     name: str
@@ -287,6 +291,7 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
             yield
         finally:
             try:
+                application.state.auth_broker.close()
                 application.state.agent_pipeline_manager.shutdown()
             finally:
                 try:
@@ -308,6 +313,8 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     app.state.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="application-worker")
     app.state.pipeline_manager = PipelineManager(store, executor=app.state.pool)
     app.state.agent_pipeline_manager = agent_manager_factory(store)
+    from .auth_broker import AuthBroker
+    app.state.auth_broker = AuthBroker(store, app.state.agent_pipeline_manager.schedule)
     app.state.browser_check_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser-practice")
     app.state.runs = {}
     app.state.browser_check_lock = threading.Lock()
@@ -321,7 +328,9 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
         if origin and origin not in {"http://127.0.0.1:8765", "http://localhost:8765", "http://testserver"}:
             return JSONResponse({"detail": "Cross-origin access is not allowed."}, status_code=403)
         if request.url.path.startswith("/api/") and request.url.path not in {"/api/session", "/api/health"}:
-            if not secrets.compare_digest(request.headers.get("x-pipeline-token", ""), app.state.token):
+            worker_wake = (request.method == 'POST' and request.url.path.startswith('/api/auth-handoffs/')
+                           and request.url.path.endswith('/wake'))
+            if not worker_wake and not secrets.compare_digest(request.headers.get("x-pipeline-token", ""), app.state.token):
                 return JSONResponse({"detail": "Local dashboard session required."}, status_code=403)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -385,6 +394,31 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     @app.get("/api/session")
     def session():
         return {"token": app.state.token}
+
+    @app.get('/api/settings/gmail-broker')
+    def gmail_broker_status():
+        return app.state.auth_broker.status()
+
+    @app.post('/api/auth-handoffs/{worker_id}/wake')
+    def auth_handoff_wake(worker_id: str, body: HandoffWakeInput, request: Request):
+        # Only the already running task's current capability may start a lookup.
+        with store.connect() as db:
+            row=db.execute('SELECT w.*,p.stop_requested FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?',(worker_id,)).fetchone()
+            token=request.headers.get('x-worker-capability','')
+            if (not row or row['state']!='running' or row['stop_requested'] or not row['capability_sha256']
+                    or not secrets.compare_digest(digest(token),row['capability_sha256'])
+                    or not row['capability_expires_at'] or row['capability_expires_at']<time.time()):
+                raise HTTPException(403,'Current worker capability required.')
+        from .auth_handoffs import wake
+        wake(store,worker_id,body.request_id)
+        return app.state.auth_broker.wake(worker_id,body.request_id)
+
+    @app.post('/api/auth-handoffs/{worker_id}/delivered')
+    def auth_handoff_delivered(worker_id: str,body: HandoffWakeInput):
+        from .auth_handoffs import wake
+        wake(store,worker_id,body.request_id)
+        app.state.agent_pipeline_manager.schedule()
+        return {'status':'checked','worker_id':worker_id}
 
     @app.get("/api/health")
     def health():

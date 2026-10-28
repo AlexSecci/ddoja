@@ -59,6 +59,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "discovery_turn_baseline", "last_context_revision", "browser_wait_scope", "instruction_digest",
     "reconciliation_recovery", "execution", "execution_history", "execution_handoff", "execution_change_deferred",
     "email_verification_final_scope",
+    "instruction_contract_id", "context_handoff_pending", "context_handoffs",
 }
 
 AGENT_DISCOVERY_PROGRESS_FIELDS = {
@@ -151,6 +152,8 @@ class Store:
         self.path = self.root / "data" / "pipeline.sqlite"
         with self.connect() as db:
             db.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
+            from .request_metrics import SCHEMA as request_metrics_schema
+            db.executescript(request_metrics_schema)
             columns = {row[1] for row in db.execute("PRAGMA table_info(pipeline_jobs)")}
             for name, declaration in (
                     ("manual_discard_reason", "TEXT NOT NULL DEFAULT ''"),
@@ -2348,12 +2351,43 @@ class Store:
                        'human_approval_unchanged': True, 'application_accepted': False}, worker['job_id'], 'supervisor')
         return self.get_agent_worker(worker_id)
 
+    def recover_current_code_rejection(self, worker_id):
+        """Resume at most twice, only after exact negative proof in an active run."""
+        from .trial_limits import read as read_trial, expired
+        with self.connect() as db:
+            worker=db.execute('SELECT w.*,p.stop_requested,p.status AS pipeline_status FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?',(worker_id,)).fetchone()
+            if (not worker or worker['role']!='submission' or worker['turn_active'] or worker['stop_requested']
+                    or worker['pipeline_status'] in {'stopped','stopping','completed'}
+                    or worker['state'] not in {'uncertain','failed','interrupted'}):return False
+            quota=db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()
+            if quota and self._agent_decode(quota[0],{}).get('paused'):return False
+            trial=read_trial(db,worker['pipeline_id'])
+            if trial and (trial['state']!='active' or expired(trial) or worker['job_id'] not in trial['job_ids']):return False
+            context=self._agent_decode(worker['context'],{})
+            if len(context.get('verified_code_rejections',[]))>=2:return False
+            evidence=self._agent_latest_cua_event(db,worker,success=True)
+            if not (evidence or {}).get('verification',{}).get('invalid_code'):return False
+        try:self.reconcile_rejected_greenhouse_code(worker_id,evidence['event_id'])
+        except Conflict:return False
+        request_path=self.root/'data/auth-handoffs'/(worker_id+'.request.json')
+        if request_path.exists():
+            request=json.loads(request_path.read_text());request['cancelled_at_unix']=time.time()
+            temporary=request_path.with_suffix('.tmp');temporary.write_text(json.dumps(request));temporary.replace(request_path)
+        with self.connect(write=True) as db:
+            # A simultaneous user stop always wins over recovery.
+            changed=db.execute("UPDATE agent_workers SET state='queued',error='' WHERE id=? AND state='stopped' AND checkpoint='security_code_rejection_reconciled' AND EXISTS(SELECT 1 FROM pipelines p WHERE p.id=agent_workers.pipeline_id AND p.stop_requested=0 AND p.status NOT IN ('stopped','stopping','completed'))",(worker_id,)).rowcount
+            if changed:self.event(db,'agent.security_code_recovery_queued',{'worker_id':worker_id,'source_event_id':evidence['event_id']},worker['job_id'],'scheduler')
+        return bool(changed)
+
     def _agent_record_inbox_decision(self, db, row, decision, provenance, now, *, batch_id=None):
         """Caller holds the write transaction and has validated this checkpoint."""
         db.execute("UPDATE agent_inbox SET state=?,response=?,provenance=?,updated_at=?,resolved_at=? WHERE id=?",
                    ("approved" if decision == "approve" else "rejected", json.dumps(decision), provenance, now, now, row["id"]))
         if decision == "approve" and row["action"] in {"browser_circuit_recovery", "browser_tab_recovery"}:
             self._agent_grant_browser_recovery_attempt(db, row["id"], now)
+        if decision == 'approve':
+            from .ephemeral_auth import bind_human_decision
+            bind_human_decision(self,db,db.execute('SELECT * FROM agent_inbox WHERE id=?',(row['id'],)).fetchone())
         db.execute("UPDATE agent_workers SET state='queued',resume_mode=?,error='',capability_sha256='',"
                    "capability_expires_at=NULL,updated_at=? WHERE id=? AND state='waiting_approval'",
                    ("same_session" if row["session_id"] else "new_session", now, row["worker_id"]))
@@ -2493,6 +2527,9 @@ class Store:
                 context = self._agent_decode(worker["context"], {})
                 context["question_reconsideration"] = {"reason": reason.strip(), "at": now,
                     "instruction": "Assess from existing evidence under the current hands-free policy. The withdrawn question has no applicant answer."}
+                # Explicit operator reconsideration deliberately refreshes this
+                # role's contract; routine prompt edits leave other sessions pinned.
+                context.pop('instruction_contract_id',None)
                 db.execute("UPDATE agent_workers SET state='interrupted',context=?,resume_mode=?,error='',"
                            "capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",
                            (json.dumps(context, ensure_ascii=False), "same_session" if worker["session_id"] else "new_session",
@@ -3679,17 +3716,17 @@ class Store:
                     bounded[key] = {"omitted_from_launch": True, "retrieve": "get_context sections=['checkpoint']"}
             worker_view["context"] = bounded
             saved_context = self._agent_decode(worker["context"], {})
-            prompt_names = {"discovery": "discovery_agent.md", "evaluator": "evaluation_agent.md",
-                            "submission": "submission_agent.md", "document": "document_agent.md"}
-            prompt_files = [self.root / "prompts" / prompt_names[worker["role"]], self.root / "prompts/agent_core.md"]
-            if saved_context.get("execution", {}).get("browser_backend") == "playwright":
-                prompt_files.append(self.root / "prompts/browser_playwright.md")
             from .efficiency_features import features
-            if features(self.root)['compact_worker_context']:
-                prompt_files.extend(self.root/'prompts'/name for name in ('agent_core_compact.md','discovery_playwright.md','submission_playwright.md'))
-            instruction_digest = digest("\n".join(path.read_text(encoding="utf-8") for path in prompt_files if path.is_file())
-                                        + json.dumps(self._agent_career_scope(), sort_keys=True)+json.dumps(features(self.root),sort_keys=True))
+            from .worker_contracts import capture, load
+            contract_id = saved_context.get('instruction_contract_id')
+            contract = load(self.root, worker_id, contract_id) if contract_id else None
+            backend = saved_context.get('execution', {}).get('browser_backend', 'cua')
+            if not contract or contract['backend'] != backend:
+                scoped = dict(worker);scoped['context'] = saved_context
+                contract = capture(self.root, scoped, features(self.root))
+            instruction_digest = contract['id']
             instructions_changed = bool(saved_context.get("instruction_digest") != instruction_digest)
+            worker_view['context']['instruction_contract_id'] = contract['id']
             current_job = db.execute("SELECT jd_version FROM jobs WHERE id=?", (worker["job_id"],)).fetchone() if worker["job_id"] else None
             current_snapshot = (worker["profile_version"] == self.profile_version(db)
                                 and (not current_job or worker["jd_version"] == current_job["jd_version"]))
@@ -3703,6 +3740,7 @@ class Store:
             task_context = {
                 "context_contract": "agent-context-v2",
                 "instructions_changed": instructions_changed,
+                "instruction_contract_id": contract['id'],
                 "context_revision": context_packet["context_revision"],
                 "runtime_controls": context_packet["runtime_controls"],
                 **({"constraints": context_packet["constraints"]} if "constraints" in context_packet else {}),
@@ -3714,6 +3752,7 @@ class Store:
             task = {"worker": worker_view, "task_context": task_context}
             latest = self._agent_decode(db.execute("SELECT context FROM agent_workers WHERE id=?", (worker_id,)).fetchone()[0], {})
             latest["instruction_digest"] = instruction_digest
+            latest['instruction_contract_id'] = contract['id']
             db.execute("UPDATE agent_workers SET context=? WHERE id=?", (json.dumps(latest), worker_id))
             db.execute("UPDATE agent_workers SET capability_sha256=?,capability_expires_at=?,launch_generation=launch_generation+1,"
                        "updated_at=? WHERE id=? AND state='running'",
@@ -3864,6 +3903,8 @@ class Store:
                 self._agent_transfer_auth_owner(db, company_auth, row)
             now = timestamp()
             from .worker_settings import pin_execution
+            from .context_budget import rotate
+            row = rotate(self, db, row)
             execution = pin_execution(self.root, db, row,
                 may_have_sent=self._context_may_have_sent_final(self._agent_decode(row["context"], {}), row["checkpoint"]), now=now)
             db.execute("UPDATE agent_workers SET state='running',turn_active=1,started_at=COALESCE(started_at,?),"
@@ -4503,6 +4544,8 @@ class Store:
             where, params = ("WHERE w.pipeline_id=?", (pipeline_id,)) if pipeline_id else ("", ())
             rows = db.execute("SELECT w.role,u.* FROM agent_usage u JOIN agent_workers w ON w.id=u.worker_id "
                               + where + " ORDER BY u.created_at,u.worker_id,u.session_id,u.turn_id", params).fetchall()
+            from .request_metrics import effective_rows, diagnostics
+            rows = effective_rows(db, rows, pipeline_id)
             roles = sorted({row["role"] for row in rows})
             execution_groups = {}
             for row in rows:
@@ -4514,6 +4557,7 @@ class Store:
                       "by_role": {role: self._agent_usage_totals([row for row in rows if row["role"] == role])
                                   for role in roles},
                       "cache": self._agent_cache_metrics(db, pipeline_id)}
+            result['provider_requests'] = diagnostics(db, pipeline_id)
             result["by_execution"] = [{"execution": dict(zip(("provider", "model", "effort", "browser_backend"), key)),
                                         **self._agent_usage_totals(group)} for key, group in execution_groups.items()]
             from .timing import summarize_timings
@@ -4576,6 +4620,8 @@ class Store:
                   "cached_input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
                   "tool_call_count": 0, "model_elapsed_seconds": 0.0,
                   "human_wait_seconds": None, "known": {}, "missing": {}}
+        result['partial_usage_turns'] = sum(bool(dict(row).get('partial_usage')) for row in rows)
+        result['token_totals_are_lower_bounds'] = bool(result['partial_usage_turns'])
         fields = {"input_tokens": "delta_input_tokens", "cached_input_tokens": "delta_cached_input_tokens",
                   "output_tokens": "delta_output_tokens", "reasoning_tokens": "delta_reasoning_tokens"}
         for output, column in fields.items():
@@ -6380,6 +6426,14 @@ class Store:
     def _agent_finish_submission(self, db, worker, payload):
         if worker["role"] != "submission" or not worker["job_id"]:
             raise Conflict("Only a scoped submission worker can finish a submission.")
+        existing = db.execute("SELECT * FROM agent_submission_results WHERE job_id=? AND state='submitted' ORDER BY rowid LIMIT 1",
+                              (worker['job_id'],)).fetchone()
+        if existing:
+            if existing['worker_id'] != worker['id']:
+                raise Conflict('This application already has a committed submission receipt.')
+            return {'result_id':existing['id'],'status':'submitted','detail':existing['detail'],
+                    'observations':self._agent_decode(existing['observations'],{}),
+                    'tool_event_ids':self._agent_decode(existing['event_ids'],[]),'already_committed':True}
         status = payload.get("status")
         if status not in {"submitted", "discarded", "uncertain", "failed"}:
             raise ValueError("Submission status must be submitted, discarded, uncertain, or failed.")
@@ -6431,11 +6485,51 @@ class Store:
 
     def _agent_begin_final_action(self, db, worker, payload):
         from .trial_limits import read as read_trial, expired
-        trial = read_trial(db, worker["pipeline_id"])
-        if trial and (trial["state"] != "active" or expired(trial) or worker["job_id"] not in trial["job_ids"]):
-            raise Conflict("The bounded trial does not authorize another final application action.")
+        trial = read_trial(db, worker['pipeline_id'])
+        if trial and (trial['state'] != 'active' or expired(trial) or worker['job_id'] not in trial['job_ids']):
+            raise Conflict('The bounded trial does not authorize another final application action.')
+        if worker['role'] != 'submission' or not worker['job_id']:
+            raise Conflict('Only a scoped submission worker can begin its final application action.')
+        if worker['stop_requested']:
+            raise Conflict('Pipeline stop was recorded before the final application action.')
+        snapshot = db.execute('SELECT jd_version,phase FROM jobs WHERE id=?',(worker['job_id'],)).fetchone()
+        if not snapshot or snapshot['jd_version'] != worker['jd_version'] or self.profile_version(db) != worker['profile_version']:
+            raise Conflict('Job or applicant snapshot changed before the final application action.')
+        if snapshot['phase'] == 'submitted' or db.execute("SELECT 1 FROM agent_submission_results WHERE job_id=? AND state='submitted'",(worker['job_id'],)).fetchone():
+            raise Conflict('This application already has a committed submission receipt.')
         from .ephemeral_auth import permitted_final
         email_verification=permitted_final(self,db,worker)
+        current_context = self._agent_decode(worker['context'], {})
+        observed = self._agent_latest_cua_event(db, worker, success=True)
+        verification = (observed or {}).get('verification') or {}
+        if (verification.get('present') and verification.get('filled_boxes') == 8
+                and verification.get('submit_enabled') and not email_verification):
+            from .ephemeral_auth import AUTH_ACTIONS
+            already = [i for i in db.execute("SELECT * FROM agent_inbox WHERE worker_id=? AND state='approved'",(worker['id'],))
+                       if i['action'] in AUTH_ACTIONS and self._agent_decode(i['context'],{}).get('jd_version') == worker['jd_version']
+                       and self._agent_decode(i['context'],{}).get('profile_version') == worker['profile_version']]
+            if already:
+                return {'authorized':False,'verification_refresh_required':True,
+                        'instruction':'The exact approval exists, but its token handoff is not current. Request a fresh handoff for this same step; do not ask for the same approval again.'}
+            job_view=db.execute('SELECT title,url FROM jobs WHERE id=?',(worker['job_id'],)).fetchone()
+            ready=self._agent_ready_artifacts(db,worker['pipeline_id'],worker['job_id'],worker['jd_version'],worker['profile_version'])
+            item,_=self._agent_insert_inbox(db,worker,'approval',dedupe_key='approval:current_email_verification_continuation',
+                action='enter_emailed_human_verification_code_to_submit',
+                summary='Complete the currently displayed email-code verification and submit '+job_view['title']+'. Eight boxes are filled; no receipt is confirmed. Only this current step is requested.',
+                context={'job_title':job_view['title'],'job_url':job_view['url'],'jd_version':worker['jd_version'],
+                         'profile_version':worker['profile_version'],'source_event_id':observed['event_id'],
+                         'ready_artifacts':self._agent_artifact_snapshot(ready),'verification_observation':verification})
+            return {'authorized':False,'state':'waiting_approval','inbox_item_id':item['id'],
+                    'instruction':'Return the final JSON with disposition waiting. Preserve this page; the human will approve the exact displayed step.'}
+        from .context_budget import last_input, limit
+        if (worker['session_id'] and not self._context_may_have_sent_final(current_context,worker['checkpoint'])
+                and current_context.get('execution',{}).get('browser_backend')=='playwright'
+                and last_input(db,worker['id'])>=limit(self.root)):
+            current_context['context_handoff_pending']=True
+            db.execute("UPDATE agent_workers SET state='queued',checkpoint='safe_context_handoff',context=?,capability_sha256='',capability_expires_at=NULL WHERE id=?",
+                       (json.dumps(current_context),worker['id']))
+            return {'authorized':False,'state':'waiting','context_handoff':True,
+                    'instruction':'Return final JSON disposition waiting. The host will hand off a compact model context and retain the same browser, documents and exact approvals; no application action has started.'}
         gates=db.execute("SELECT * FROM agent_browser_controls WHERE state='open' AND scope_key IN (?,?)",
                       (self._agent_connector_scope(worker), "company:" + worker["company_id"])).fetchall()
         if any(not(email_verification and gate['control_type']=='company_auth' and gate['worker_id']==worker['id']) for gate in gates):
@@ -6489,6 +6583,8 @@ class Store:
             verified=(observation or {}).get('verification') or {}
             if not (scope and context.get('email_verification_final_scope')!=scope and verified.get('present')
                     and verified.get('filled_boxes')==8 and verified.get('submit_enabled')):
+                if scope and not verified.get('present'):
+                    raise Conflict('The approved verification needs a FULL current browser_snapshot with empty arguments, no target/depth/filename, before begin_final_action. Do not retry Submit or request the same approval.')
                 raise Conflict("A final action may already have started; reconcile it instead of authorizing another click.")
             context['email_verification_final_scope']=scope
             self.event(db,'agent.email_verification_continuation_authorized',{'worker_id':worker['id'],'scope':scope,'browser_event_id':observation['event_id']},worker['job_id'],'agent_runtime')
@@ -6550,7 +6646,7 @@ class Store:
             elif worker["stop_requested"]:
                 state = "stopped"
                 error = error or "Pipeline stopped at a safe worker boundary."
-            elif worker["state"] == "queued" and disposition in {"waiting", "completed"}:
+            elif worker["state"] == "queued" and (disposition in {"waiting", "completed"} or context.get('context_handoff_pending')):
                 # A user may answer a just-created inbox item before the old
                 # process exits. Keep the newly queued same-session turn intact.
                 state = "queued"

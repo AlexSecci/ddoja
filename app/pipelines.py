@@ -595,6 +595,11 @@ class AgentPipelineManager:
                 pass
         finally:
             try:
+                self.store.recover_current_code_rejection(worker_id)
+            except Exception as recovery_error:
+                with self.store.connect(write=True) as db:
+                    self.store.event(db,'agent.code_recovery_attention',{'worker_id':worker_id,'error_type':type(recovery_error).__name__},worker.get('job_id'),'scheduler')
+            try:
                 latest=self.store.get_agent_worker(worker_id)
                 if latest['state'] in {'completed','discarded'} and latest.get('context',{}).get('execution',{}).get('browser_backend')=='playwright':
                     from .browser_sessions import BrowserSessions

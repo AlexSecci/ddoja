@@ -230,9 +230,15 @@ class AgentMCPBridge:
         self._compact=bool(context_root and features(context_root)['compact_worker_context'])
         self._action_handler = action_handler
         self._document_renderer = document_renderer
+        self._catalog = None
+        if os.environ.get('AGENT_CONTRACT_ID') and context_root:
+            from app.worker_contracts import load
+            contract = load(context_root, worker_id, os.environ['AGENT_CONTRACT_ID'])
+            if contract['role'] != role:raise ValueError('Pinned tool role does not match worker.')
+            self._catalog = contract['agent_tools']
 
     def tools(self) -> list[dict[str, Any]]:
-        return [{"name": name, **TOOL_DEFINITIONS[name]} for name in ROLE_TOOLS[self.role]]
+        return self._catalog if self._catalog is not None else [{"name": name, **TOOL_DEFINITIONS[name]} for name in ROLE_TOOLS[self.role]]
 
     def call(self, name: str, arguments: Any) -> dict[str, Any]:
         if name not in ROLE_TOOLS[self.role]:
