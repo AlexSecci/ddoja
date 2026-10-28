@@ -25,6 +25,12 @@ submission receipt is idempotent and takes precedence over later transport error
 Browser cleanup belongs to the host after the receipt; no model cleanup turn is
 required. Only a current exact negative Greenhouse code-rejection observation
 can enable bounded same-step recovery. Unknown outcomes remain reconciliation-only.
+An initial Submit whose only attempted click failed native reference lookup can
+also recover once, provided the exact error proves the click never executed,
+there were no other mutations after authorization, the same owned browser remains
+live, and a fresh exact-page snapshot exists. Timeouts and disconnected outcomes
+do not qualify. Uploads include a fresh inline snapshot so the agent receives
+the references created after attachment.
 
 `config/submission-efficiency.json` configures the context budget and bounded
 email handoff waits. These are checkpoint waits, not overall application time

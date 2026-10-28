@@ -60,6 +60,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "reconciliation_recovery", "execution", "execution_history", "execution_handoff", "execution_change_deferred",
     "email_verification_final_scope",
     "instruction_contract_id", "context_handoff_pending", "context_handoffs",
+    "unexecuted_click_recovery", "verified_code_rejections",
 }
 
 AGENT_DISCOVERY_PROGRESS_FIELDS = {
@@ -2366,7 +2367,7 @@ class Store:
             context=self._agent_decode(worker['context'],{})
             if len(context.get('verified_code_rejections',[]))>=2:return False
             evidence=self._agent_latest_cua_event(db,worker,success=True)
-            if not (evidence or {}).get('verification',{}).get('invalid_code'):return False
+            if not ((evidence or {}).get('verification') or {}).get('invalid_code'):return False
         try:self.reconcile_rejected_greenhouse_code(worker_id,evidence['event_id'])
         except Conflict:return False
         request_path=self.root/'data/auth-handoffs'/(worker_id+'.request.json')

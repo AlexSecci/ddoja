@@ -178,6 +178,7 @@ def test_stopped_worker_cannot_create_automatic_verification_request(tmp_path,mo
 def test_code_parser_requires_single_semantic_or_unambiguous_code():
     def mail(text):return {'mimeType':'text/plain','body':{'data':base64.urlsafe_b64encode(text.encode()).decode().rstrip('=')}}
     assert extract_code(mail('Your security code is: Ab1Cd2Ef'))=='Ab1Cd2Ef'
+    assert extract_code(mail('Copy this code into the security code field on your application: ABCDEFGH After entering it, resubmit your application.'))=='ABCDEFGH'
     assert extract_code(mail('Ab1Cd2Ef and Cd3Ef4Gh')) is None
 
 
@@ -266,3 +267,56 @@ def test_concurrent_provider_endpoints_are_per_worker_not_shared_runtime_state(t
     b=runtime._args({**base,'id':'second','_provider_base_url':'http://127.0.0.1:1002/second'},tmp_path/'schema',{})
     assert any('1001/first' in arg for arg in a) and not any('1002/second' in arg for arg in a)
     assert any('1002/second' in arg for arg in b) and not any('1001/first' in arg for arg in b)
+
+
+def test_experiment_status_serializes_provider_usage_and_worker_counts(tmp_path,monkeypatch):
+    from tools import experiment_status
+    s,p,j,wid=fixture(tmp_path,monkeypatch)
+    folder=tmp_path/'data/experiments/fixture';folder.mkdir(parents=True)
+    (folder/'state.json').write_text(json.dumps({'jobs':[], 'watermarks':{
+        'events':0,'agent_usage':0,'agent_runtime_events':0,'agent_submission_results':0,'agent_provider_requests':0}}))
+    (folder.parent/'current.json').write_text(json.dumps({'baseline':str(folder),'pipeline_id':p['id']}))
+    monkeypatch.setattr(experiment_status,'ROOT',tmp_path)
+    result=experiment_status.status()
+    assert isinstance(result['worker_states'],dict)
+    assert result['provider_response_delta']['requests']==0
+    json.dumps(result)
+
+
+@pytest.mark.parametrize('negative_proof',[True,False])
+def test_reference_recovery_requires_native_preexecution_error_not_timeout(tmp_path,monkeypatch,negative_proof):
+    from app.negative_action import recover_unexecuted_click
+    from app.store import timestamp
+    s,p,j,wid=fixture(tmp_path,monkeypatch);now=timestamp()
+    with s.connect(write=True) as db:
+        db.execute("UPDATE agent_browser_controls SET state='closed' WHERE worker_id=?",(wid,))
+        db.execute("UPDATE pipelines SET status='running' WHERE id=?",(p['id'],))
+        db.execute('UPDATE agent_workers SET context=? WHERE id=?',(json.dumps({'final_action_may_have_been_sent':True,'final_action_authorized_at':now}),wid))
+        s.event(db,'agent.final_action_authorized',{'worker_id':wid},j['id'],'test')
+    error='### Error\nError: Ref e237 not found in the current page snapshot. Try capturing new snapshot.' if negative_proof else '### Error\nTimeout waiting for click response.'
+    event={'type':'tool_result','tool_name':'playwright.browser_click','success':False,'session_id':'fixture-session',
+        'transport_event':{'item':{'type':'mcp_tool_call','server':'playwright','tool':'browser_click','status':'failed',
+        'arguments':{'target':'e237'},'result':{'content':[{'type':'text','text':error}]}}}}
+    s.agent_runtime_event(wid,event)
+    text='### Page\n- Page URL: '+j['url']+'\n### Snapshot\n- button "Submit application" [ref=e300]'
+    event=copy.deepcopy(event);event.update(tool_name='playwright.browser_snapshot',success=True)
+    event['transport_event']['item'].update(tool='browser_snapshot',status='completed',arguments={},result={'content':[{'type':'text','text':text}]})
+    s.agent_runtime_event(wid,event)
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='uncertain',turn_active=0 WHERE id=?",(wid,))
+    monkeypatch.setattr('app.browser_sessions.BrowserSessions.inspect',lambda *a:{'state':'live'})
+    assert recover_unexecuted_click(s,wid) is negative_proof
+    w=s.get_agent_worker(wid)
+    assert w['context']['final_action_may_have_been_sent'] is not negative_proof
+    if negative_proof:assert w['context']['unexecuted_click_recovery']['prior_send_flag']
+
+
+def test_upload_returns_new_references_without_an_extra_model_snapshot():
+    from tools.browser_mcp import BrowserBridge
+    class RPC:
+        def __init__(self):self.calls=[]
+        def call(self,name,args):
+            self.calls.append(name)
+            return {'content':[{'type':'text','text':'fresh refs' if name=='browser_snapshot' else 'file attached'}]}
+    b=BrowserBridge.__new__(BrowserBridge);b.catalog=[{'name':'browser_file_upload'}];b.role='submission';b.rpc=RPC()
+    result=b.call('browser_file_upload',{'paths':['fictional.pdf']})
+    assert b.rpc.calls==['browser_file_upload','browser_snapshot'] and result['content'][-1]['text']=='fresh refs'

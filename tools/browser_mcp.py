@@ -52,6 +52,11 @@ class BrowserBridge:
 
     def call(self,name,arguments):
         if name not in {t['name'] for t in self.catalog}:raise ValueError('Browser tool is outside this worker allowlist.')
+        if name=='browser_file_upload' and self.role=='submission':
+            result=self.rpc.call(name,arguments)
+            snapshot=self.rpc.call('browser_snapshot',{})
+            return {**result,'content':[*result.get('content',[]),*snapshot.get('content',[])],
+                    'isError':bool(result.get('isError') or snapshot.get('isError'))}
         if name=='browser_fill_form' and self.settings['batch_form_edits'] and self.role=='submission':
             arguments=dict(arguments);target=arguments.pop('observe_target',None);expected=arguments.pop('expected_url',None)
             fields=arguments.get('fields')

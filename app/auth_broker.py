@@ -27,7 +27,7 @@ def extract_code(payload):
             parser=_Text();parser.feed(text);chunks.append(' '.join(parser.parts))
         for child in part.get('parts',[]):walk(child)
     walk(payload);text=' '.join(chunks)
-    match=re.search(r'(?:security|verification)\s+code\s*(?:is|:)\s*([A-Za-z0-9]{8})\b',text,re.I)
+    match=re.search(r'(?:(?:security|verification)\s+code|application)\s*(?:is|:)\s*([A-Za-z0-9]{8})\b',text,re.I)
     if match:return match.group(1)
     candidates={v for v in re.findall(r'\b[A-Za-z0-9]{8}\b',text) if any(c.isdigit() for c in v) and any(c.isalpha() for c in v)}
     return next(iter(candidates)) if len(candidates)==1 else None

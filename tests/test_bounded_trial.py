@@ -18,6 +18,23 @@ def prepared(tmp_path):
     return store, pipeline, discovery, jobs
 
 
+def test_same_trial_submission_continuation_keeps_provider_and_job_limits(tmp_path):
+    from app.trial_limits import allows
+    store,pipeline,discovery,jobs=prepared(tmp_path)
+    policy=store.configure_agent_trial(pipeline['id'],jobs[:1],seconds=None,max_invocations=None,max_discovery_invocations=0)
+    with store.connect(write=True) as db:
+        wid=store._agent_insert_worker(db,pipeline['id'],'submission',job_id=jobs[0])
+    assert store.reserve_agent_worker(wid)
+    # Its current-trial execution is already durable; resuming the exact same
+    # task after an email wait does not grant any final-action approval.
+    with store.connect() as db:
+        row=db.execute('SELECT * FROM agent_workers WHERE id=?',(wid,)).fetchone()
+        choice=json.loads(row['context'])['execution']
+        assert allows(db,row,choice,may_have_sent=True)
+        assert not allows(db,{**dict(row),'job_id':jobs[1]},choice,may_have_sent=True)
+        assert not allows(db,row,{**choice,'provider':'openai'},may_have_sent=True)
+
+
 def expire(store, pipeline_id):
     with store.connect(write=True) as db:
         key = 'agent_trial:' + pipeline_id

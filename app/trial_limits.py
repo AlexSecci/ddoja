@@ -32,7 +32,9 @@ def allows(db, worker, desired, *, may_have_sent=False):
         return False
     if may_have_sent:
         prior = json.loads(worker['context']).get('execution', {})
-        if not (policy.get('reconciliation_allowed') and worker['id'] in policy.get('allowed_worker_ids', [])
+        current_trial_continuation = (worker['role']=='submission' and worker['job_id'] in policy['job_ids']
+                                      and any(row['worker_id']==worker['id'] for row in runs(db,policy)))
+        if not ((current_trial_continuation or policy.get('reconciliation_allowed') and worker['id'] in policy.get('allowed_worker_ids', []))
                 and prior.get('provider') == policy['provider'] and prior.get('model') == policy['model']):
             return False
     if desired.get("provider") != policy["provider"] or desired.get("model") != policy["model"]:

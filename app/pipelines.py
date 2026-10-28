@@ -596,6 +596,8 @@ class AgentPipelineManager:
         finally:
             try:
                 self.store.recover_current_code_rejection(worker_id)
+                from .negative_action import recover_unexecuted_click
+                recover_unexecuted_click(self.store,worker_id)
             except Exception as recovery_error:
                 with self.store.connect(write=True) as db:
                     self.store.event(db,'agent.code_recovery_attention',{'worker_id':worker_id,'error_type':type(recovery_error).__name__},worker.get('job_id'),'scheduler')
