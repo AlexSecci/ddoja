@@ -83,7 +83,7 @@ class BrowserSessions:
         if value.get('worker_id')!=worker_id or value.get('root')!=str(self.root):
             raise RuntimeError('Browser owner metadata does not match this workspace.')
         live=process_identity(value['pid'])==value.get('process_identity')
-        return {**value,'state':'live' if live else 'lost','live_state_preserved':live}
+        return {**value,'state':'live' if live else 'lost','live_state_preserved':live and value.get('live_state_preserved',False)}
 
     @staticmethod
     def reachable(value):
@@ -97,6 +97,8 @@ class BrowserSessions:
             old=self.inspect(worker_id)
             if old['state']=='live':
                 if not self.reachable(old):raise RuntimeError('The owned browser service is live but unavailable; preserve it for recovery.')
+                old['live_state_preserved']=True
+                (folder/'session.json').write_text(json.dumps(old),encoding='utf-8')
                 return {**old,'reused':True}
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]

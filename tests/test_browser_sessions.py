@@ -42,3 +42,12 @@ def test_pid_reuse_and_other_owner_cannot_be_claimed(tmp_path,monkeypatch):
 def test_current_process_has_stable_actual_creation_identity():
     import os
     assert process_identity(os.getpid()) and process_identity(os.getpid())==process_identity(os.getpid())
+
+
+def test_lost_browser_after_possible_send_does_not_spawn_replacement(tmp_path,monkeypatch):
+    from app import browser_backends
+    monkeypatch.setattr(browser_backends,'playwright_status',lambda *_:{'ready':True,'node':'node','cli':'fixture-cli','browser':'fixture-browser'})
+    monkeypatch.setattr(BrowserSessions,'inspect',lambda *a:{'state':'lost'})
+    monkeypatch.setattr(BrowserSessions,'ensure',lambda *a:pytest.fail('A possible send forbids automatic replacement'))
+    with pytest.raises(RuntimeError,match='possible send'):
+        browser_backends.playwright_args(tmp_path,{'id':'one','role':'submission','context':{'final_action_may_have_been_sent':True}})

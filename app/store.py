@@ -3955,7 +3955,7 @@ class Store:
                 from .browser_sessions import BrowserSessions
                 retained=BrowserSessions(self.root).inspect(worker['id'])
                 context['browser_freshness'].update(browser_generation=retained.get('generation'),
-                    live_state_preserved=retained['state']=='live',
+                    live_state_preserved=retained.get('live_state_preserved',False),
                     required_action='Inspect the retained owned page first. Verify current account, exact job and saved/unsaved values with a fresh observation, then complete_auth. Reload only if the actual page/session expired or the browser was lost; never replay an uncertain send.')
         db.execute("UPDATE agent_workers SET context=?,updated_at=? WHERE id=?", (json.dumps(context), now, worker["id"]))
         self.event(db, "agent.browser_resume_prepared", {"pipeline_id": worker["pipeline_id"],
@@ -5336,7 +5336,7 @@ class Store:
         if self._agent_decode(worker['context'],{}).get('execution',{}).get('browser_backend')=='playwright':
             from .browser_sessions import BrowserSessions
             state=BrowserSessions(self.root).inspect(worker['id'])
-            browser_session={'browser_session':{k:state.get(k) for k in ('state','generation','live_state_preserved','worker_id')}}
+            browser_session={'browser_session':{k:state.get(k) for k in ('state','generation','previous_generation','live_state_preserved','worker_id')}}
         return {"quota_paused": quota["paused"], "quota": quota,
                 **browser_session,
                 **({'routine_email_tokens':self._agent_decode(email_policy[0],{})} if email_policy else {}),

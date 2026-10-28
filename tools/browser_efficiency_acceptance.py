@@ -2,6 +2,7 @@
 import argparse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import queue
 import re
@@ -100,6 +101,7 @@ def inspect(client):
 
 def lifetime(output):
     status=playwright_status(ROOT);root=Path(tempfile.mkdtemp(prefix='ddoja-lifetime-ablation-'));resume=root/'fictional-resume.txt';resume.write_text('Test Candidate. Synthetic only.')
+    (root/'config').mkdir();(root/'config/efficiency.json').write_text(json.dumps({'batch_form_edits':False,'compact_worker_context':False}))
     server=ThreadingHTTPServer(('127.0.0.1',0),Page);threading.Thread(target=server.serve_forever,daemon=True).start();url=f'http://127.0.0.1:{server.server_port}/fictional'
     registry=BrowserSessions(root);data={'root':str(root),'method':'real Chromium, identical fictional form, no model calls'}
     try:
@@ -132,10 +134,16 @@ def lifetime(output):
         with BrowserRPC(other['endpoint']) as client:isolated=inspect(client)
         assert isolated['first']=='' and isolated['file']==''
         data['improved']={'values_retained':True,'file_retained':True,'transient_js_nonce_retained':True,'same_live_process':True,'separate_owner_isolated':True,'survived_cli_termination':True,'upload_calls_for_one_resume':sum(c['tool']=='browser_file_upload' for c in persistent_calls),'calls':persistent_calls}
+        before_path=root/'host-before.json'
+        subprocess.run([sys.executable,str(Path(__file__).resolve()),'--area','host-child','--fixture-root',str(root),'--fixture-url',url,'--output',str(before_path)],check=True,timeout=30)
+        prior=json.loads(before_path.read_text());reattached=BrowserSessions(root).ensure('host-restarted',status)
+        with BrowserRPC(reattached['endpoint']) as client:after=inspect(client)
+        assert prior['state']==after and prior['generation']==reattached['generation']
+        data['improved']['survived_host_process_exit_and_reattachment']=True
         data['passed']=True
     finally:
         server.shutdown()
-        for wid in ('persistent-owner','different-owner'):
+        for wid in ('persistent-owner','different-owner','host-restarted'):
             if registry.inspect(wid)['state']=='live':registry.close(wid,force=True)
     output.parent.mkdir(parents=True,exist_ok=True);output.write_text(json.dumps(data,indent=2),encoding='utf-8');return data
 
@@ -170,5 +178,11 @@ def batching(output):
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--area',choices=['lifetime','batching'],default='lifetime');parser.add_argument('--output',type=Path,required=True);options=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--area',choices=['lifetime','batching','host-child'],default='lifetime');parser.add_argument('--output',type=Path,required=True);parser.add_argument('--fixture-root',type=Path);parser.add_argument('--fixture-url');options=parser.parse_args()
+    if options.area=='host-child':
+        registry=BrowserSessions(options.fixture_root);owned=registry.ensure('host-restarted',playwright_status(ROOT))
+        with BrowserRPC(owned['endpoint']) as client:
+            populate(client,options.fixture_url,options.fixture_root/'fictional-resume.txt');state=inspect(client)
+        options.output.write_text(json.dumps({'state':state,'generation':owned['generation']}))
+        os._exit(0)  # Actual host-process loss; no destructor/service cleanup.
     print(json.dumps((lifetime if options.area=='lifetime' else batching)(options.output)))

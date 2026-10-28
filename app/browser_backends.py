@@ -45,7 +45,13 @@ def playwright_args(root, worker):
     persistent=features(root)['persistent_browser']
     if persistent:
         from .browser_sessions import BrowserSessions
-        BrowserSessions(root).ensure(worker_id,status)
+        registry=BrowserSessions(root)
+        context=worker.get('context',{})
+        if isinstance(context,str):context=json.loads(context)
+        may_sent=context.get('final_action_may_have_been_sent') or worker.get('checkpoint') in {'final_action_in_flight','final_action_uncertain','submission_uncertain'}
+        if may_sent and registry.inspect(worker_id)['state']!='live':
+            raise RuntimeError('The browser was lost after a possible send. Preserve the uncertain outcome; no replacement browser was started.')
+        registry.ensure(worker_id,status)
     prefix = "mcp_servers." + PLAYWRIGHT_SERVER
     command=sys.executable if persistent else status['node']
     command_args=([str(Path(__file__).resolve().parents[1]/'tools/browser_mcp.py'),'--root',str(Path(root).resolve()),
