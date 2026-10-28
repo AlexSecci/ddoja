@@ -15,3 +15,5 @@ Baseline: commit `22847b0`; source and SQLite snapshot saved under `data/experim
 Measurements use feature switches and identical local fixtures with one area changed at a time. Report mechanism-level measurements separately from actual model timings, include failures and missing counters, and avoid generalizing synthetic results into guaranteed employer throughput. No production application will be sent as a benchmark.
 
 Completion requires all five implementations, focused regressions plus an appropriate full suite, real-browser acceptance, independent measurements, preserved production data, deployment without resuming campaigns, committed/pushed code and a requirement-by-requirement evidence report.
+
+Completed on 28 October 2026. See [the independent measurements and verification report](five-area-improvements-results.md), with full local evidence indexed by `data/experiments/five-area-improvements/results.json` and `completion-audit.json`.
