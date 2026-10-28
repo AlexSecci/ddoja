@@ -140,3 +140,23 @@ def test_terminal_receipt_does_not_interrupt_live_turn_cleanup(tmp_path):
     with store.connect(write=True) as db:
         db.execute("UPDATE agent_workers SET turn_active=0,state='completed' WHERE id=?",(discovery['id'],))
     assert 'terminal results' in store.agent_trial_stop_reason(pipeline['id'])
+
+
+def test_job_bounded_trial_without_time_or_invocation_cutoff_keeps_admission(tmp_path):
+    store, pipeline, discovery, jobs = prepared(tmp_path)
+    policy = store.configure_agent_trial(pipeline['id'], jobs[:1], seconds=None,
+                                         max_invocations=None, max_discovery_invocations=0)
+    assert policy['deadline_unix'] is None and policy['max_invocations'] is None
+    store.resume_agent_pipeline(pipeline['id'])
+    evaluators = [w for w in store.list_agent_workers(pipeline['id']) if w['role'] == 'evaluator']
+    excluded = next(w for w in evaluators if w['job_id'] == jobs[1])
+    allowed = next(w for w in evaluators if w['job_id'] == jobs[0])
+    assert not store.reserve_agent_worker(discovery['id'])
+    assert not store.reserve_agent_worker(excluded['id'])
+    for _ in range(2):
+        assert store.reserve_agent_worker(allowed['id'])
+        store.agent_launch_context(allowed['id'])
+        assert store.agent_trial_stop_reason(pipeline['id']) is None
+        store.finish_agent_turn(allowed['id'], {'disposition': 'interrupted'})
+        with store.connect(write=True) as db:
+            db.execute("UPDATE agent_workers SET state='queued' WHERE id=?", (allowed['id'],))

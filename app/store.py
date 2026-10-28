@@ -76,8 +76,8 @@ class Store:
     def configure_agent_trial(self, pipeline_id, job_ids, *, seconds=900, max_invocations=12, max_discovery_invocations=1):
         from .trial_limits import PREFIX
         if (not isinstance(job_ids, list) or not 1 <= len(job_ids) <= 3 or len(set(job_ids)) != len(job_ids)
-                or type(seconds) is not int or not 30 <= seconds <= 1800
-                or type(max_invocations) is not int or not 1 <= max_invocations <= 30
+                or (seconds is not None and (type(seconds) is not int or not 30 <= seconds <= 1800))
+                or (max_invocations is not None and (type(max_invocations) is not int or not 1 <= max_invocations <= 30))
                 or type(max_discovery_invocations) is not int or not 0 <= max_discovery_invocations <= 1):
             raise ValueError("Invalid bounded trial limits.")
         with self.connect(write=True) as db:
@@ -94,7 +94,7 @@ class Store:
                         raise Conflict("A possibly sent application cannot enter a new-provider trial.")
             now = time.time()
             policy = {"state": "active", "pipeline_id": pipeline_id, "job_ids": job_ids, "provider": "deepseek", "model": "deepseek-flash",
-                      "started_at": timestamp(), "deadline_unix": now + seconds, "max_invocations": max_invocations,
+                      "started_at": timestamp(), "deadline_unix": now + seconds if seconds is not None else None, "max_invocations": max_invocations,
                       "max_discovery_invocations": max_discovery_invocations,
                       "execution_watermark": db.execute("SELECT COALESCE(MAX(rowid),0) FROM agent_execution_runs").fetchone()[0]}
             db.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (PREFIX + pipeline_id, json.dumps(policy)))
