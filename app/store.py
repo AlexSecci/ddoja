@@ -273,6 +273,8 @@ class Store:
         self.path = self.root / "data" / "pipeline.sqlite"
         with self.connect() as db:
             db.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
+            if 'decision_source' not in {r[1] for r in db.execute('PRAGMA table_info(agent_discovery_inventory)')}:
+                db.execute("ALTER TABLE agent_discovery_inventory ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'observation'")
             from .request_metrics import SCHEMA as request_metrics_schema
             db.executescript(request_metrics_schema)
             columns = {row[1] for row in db.execute("PRAGMA table_info(pipeline_jobs)")}
@@ -566,6 +568,9 @@ class Store:
         result["submission_paused"] = bool(result.get("submission_paused", 0))
         result["counts"] = (self._agent_pipeline_counts(db, result["id"])
                             if result.get("mode") == "agentic" else self._pipeline_counts(db, result["id"]))
+        if result.get('mode')=='agentic':
+            from .discovery_inventory import accounting
+            result['discovery']['accounting']=accounting(db,result['id'],result['discovery'].get('coverage') or {},result['discovery'].get('worker_id'))
         return result
 
     def get_pipeline(self, pipeline_id):
@@ -781,6 +786,7 @@ class Store:
                 raise KeyError(pipeline_id)
             current_profile_version = self.profile_version(db)
             rows = db.execute("SELECT j.*,o.status AS application_status,o.provenance AS application_provenance,"
+                              "EXISTS(SELECT 1 FROM agent_submission_results r WHERE r.job_id=j.id AND r.state='submitted') AS has_submission_receipt,"
                               "pj.agent_decision,pj.agent_reason,pj.agent_status,"
                               "pj.fit_score,pj.fit_payload,pj.fit_jd_version,pj.fit_profile_version "
                               "FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
@@ -2286,7 +2292,83 @@ class Store:
                 counts["uncertain"] += 1
         counts["awaiting_user"] = db.execute("SELECT COUNT(*) FROM agent_inbox WHERE pipeline_id=? AND state='pending'",
                                              (pipeline_id,)).fetchone()[0]
+        from .discovery_inventory import summary
+        inventory=summary(db,pipeline_id)
+        counts['discovered']=inventory['listing_identities']
+        counts['excluded']+=inventory['inventory_excluded']
+        counts.update({key:inventory[key] for key in ('full_jd_records','unreviewed_listings','historical_exclusions','observed_native_listings')})
         return counts
+
+    def discovery_inventory(self,pipeline_id,*,disposition='all',offset=0,limit=50):
+        if disposition not in {'all','unreviewed','selected','excluded'} or type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=100:
+            raise ValueError('Choose an inventory state and a valid page of up to 100 listings.')
+        from .discovery_inventory import accounting
+        with self.connect() as db:
+            p=db.execute('SELECT discovery_payload FROM pipelines WHERE id=?',(pipeline_id,)).fetchone()
+            if not p:raise KeyError(pipeline_id)
+            report=self._agent_decode(p[0],{})
+            where='pipeline_id=?';args=[pipeline_id]
+            if disposition!='all':where+=' AND disposition=?';args.append(disposition)
+            total=db.execute('SELECT COUNT(*) FROM agent_discovery_inventory WHERE '+where,args).fetchone()[0]
+            rows=[dict(r) for r in db.execute('SELECT * FROM agent_discovery_inventory WHERE '+where+
+                ' ORDER BY CASE disposition WHEN \'unreviewed\' THEN 0 WHEN \'selected\' THEN 1 ELSE 2 END,title,id LIMIT ? OFFSET ?',[*args,limit,offset])]
+            return {'rows':rows,'total':total,'offset':offset,'limit':limit,
+                'accounting':accounting(db,pipeline_id,report.get('coverage') or {},report.get('worker_id'))}
+
+    def recover_discovery_inventory(self,pipeline_id):
+        """Recover saved browser identities and reported history; never launch work."""
+        from .discovery_inventory import capture_page,link_registered_jobs,summary
+        with self.connect(write=True) as db:
+            p=db.execute("SELECT * FROM pipelines WHERE id=? AND mode='agentic'",(pipeline_id,)).fetchone()
+            if not p:raise KeyError(pipeline_id)
+            if db.execute('SELECT 1 FROM agent_workers WHERE pipeline_id=? AND turn_active=1',(pipeline_id,)).fetchone():
+                raise Conflict('Recover historical listing records only while this campaign has no live worker turns.')
+            report=self._agent_decode(p['discovery_payload'],{});now=timestamp();pages=0
+            for event in db.execute("SELECT e.* FROM agent_runtime_events e JOIN agent_workers w ON w.id=e.worker_id "
+                    "WHERE w.pipeline_id=? AND w.role='discovery' AND e.success=1 ORDER BY e.rowid",(pipeline_id,)).fetchall():
+                if capture_page(db,pipeline_id,event['worker_id'],event['id'],self._agent_decode(event['payload'],{}),event['created_at']):pages+=1
+            link_registered_jobs(db,pipeline_id,now)
+            expected=(report.get('coverage') or {}).get('listing_total')
+            observed=db.execute('SELECT COUNT(*) FROM agent_discovery_inventory WHERE pipeline_id=? AND source_event_id IS NOT NULL',(pipeline_id,)).fetchone()[0]
+            if report.get('status')=='complete' and type(expected) is int and expected==observed:
+                # Replay the prior agent's reported exclusion, not a newly
+                # invented filter reason or a newly verified classification.
+                db.execute("UPDATE agent_discovery_inventory SET disposition='excluded',decision_source='historical_report',"
+                    "reason='Prior discovery reported this listing filtered out; its individual filter reason was not saved.',updated_at=? "
+                    "WHERE pipeline_id=? AND job_id IS NULL AND disposition='unreviewed'",(now,pipeline_id))
+            result=summary(db,pipeline_id)
+            self.event(db,'agent.discovery_inventory_recovered',{'pipeline_id':pipeline_id,'board_observations':pages,
+                **result,'new_workers_started':0},actor='supervisor')
+            return result
+
+    def _agent_record_discovery_inventory(self,db,worker,payload):
+        from .discovery_inventory import upsert,summary
+        entries=payload.get('listings')
+        if not isinstance(entries,list) or not 1<=len(entries)<=50:
+            raise ValueError('Record between 1 and 50 observed listing identities per batch.')
+        capture=self._agent_capture_ref(db,worker)
+        if not capture:raise Conflict('A current successful inline browser observation is required.')
+        text='\n'.join(b.get('text','') for b in capture['content'] if isinstance(b,dict))
+        now=timestamp()
+        for entry in entries:
+            if not isinstance(entry,dict) or not self._agent_url_allowed(entry.get('url'),test_only=bool(worker['agent_test_only'])):
+                raise ValueError('Every inventory entry needs its exact observed listing URL.')
+            if entry['url'] not in text:raise Conflict('A listing URL is absent from the current browser observation.')
+            old=db.execute('SELECT * FROM agent_discovery_inventory WHERE pipeline_id=? AND url=?',
+                           (worker['pipeline_id'],entry['url'])).fetchone()
+            title=entry.get('title') or (old['title'] if old else '')
+            if not title or not isinstance(title,str):raise ValueError('A newly observed identity needs its title.')
+            if not old and title not in text:raise Conflict('The listing title is absent from the browser evidence.')
+            decision=entry.get('disposition','unreviewed');reason=entry.get('reason') or ''
+            if decision not in {'unreviewed','excluded'} or not isinstance(reason,str):raise ValueError('Choose unreviewed or excluded.')
+            if decision=='excluded' and not reason.strip():raise ValueError('An excluded listing needs its specific filter reason.')
+            page=re.search(r'(?m)^- Page URL: (\S+)',text)
+            upsert(db,worker['pipeline_id'],{'url':entry['url'],'title':title,'requisition_id':entry.get('requisition_id') or (old['requisition_id'] if old else None),
+                'location':entry.get('location') or (old['location'] if old else ''),'disposition':decision,'reason':reason,
+                'source_page':page[1] if page else '', 'decision_source':'agent'},worker_id=worker['id'],event_id=capture['event_id'],observed_at=now,now=now)
+        self.event(db,'agent.discovery_inventory_recorded',{'pipeline_id':worker['pipeline_id'],'worker_id':worker['id'],
+            'count':len(entries),'source_event_id':capture['event_id']},actor='agent_discovery')
+        return summary(db,worker['pipeline_id'])
 
     def agent_pipeline_counts(self, pipeline_id):
         with self.connect() as db:
@@ -3317,6 +3399,8 @@ class Store:
         title = payload.get("title")
         jd = payload.get("jd")
         raw_url = payload.get("url")
+        if payload.get('selected') is False and not str(payload.get('selection_reason') or '').strip():
+            raise ValueError('A filtered-out listing requires its specific observed exclusion reason.')
         if not isinstance(title, str) or not title.strip() or not isinstance(jd, str) or not jd.strip():
             raise ValueError("A listing requires its actual title and complete job description.")
         test_only_row = db.execute("SELECT agent_test_only FROM pipelines WHERE id=?",
@@ -3443,6 +3527,10 @@ class Store:
                    "job_id": job_id, "requisition_id": requisition, "created": created, "changed": changed,
                    "selected": selected, "selection_reason": reason, "observation": selection_observation,
                    "description_sha256": checksum}, job_id, "agent_discovery")
+        from .discovery_inventory import upsert
+        upsert(db,worker['pipeline_id'],{'url':url,'title':title.strip(),'requisition_id':requisition,
+            'location':str(metadata.get('location') or ''),'reason':reason},worker_id=worker['id'],
+            observed_at=now,now=now,job_id=job_id,selected=selected)
         return {"job_id": job_id, "created": created, "changed": changed, "selected": selected,
                 "selection_reason": reason, "jd_version": job["jd_version"],
                 "evaluator_worker_id": created_evaluator}
@@ -4797,6 +4885,9 @@ class Store:
             db.execute("INSERT INTO agent_runtime_events(id,worker_id,session_id,event_type,tool_name,success,payload,created_at) "
                        "VALUES(?,?,?,?,?,?,?,?)",
                        (event_id, worker_id, session_id or row["session_id"], event_type, tool_name, success, payload, timestamp()))
+            if row['role']=='discovery' and success==1 and (tool_name.startswith('playwright.') or tool_name=='cua_repl.js'):
+                from .discovery_inventory import capture_page
+                capture_page(db,row['pipeline_id'],worker_id,event_id,event,timestamp())
             if session_id:
                 db.execute("UPDATE agent_workers SET session_id=?,updated_at=? WHERE id=?", (session_id, timestamp(), worker_id))
             db.execute("UPDATE agent_workers SET capability_expires_at=? WHERE id=? AND capability_sha256!=''",
@@ -5493,6 +5584,7 @@ class Store:
             return role in {"discovery", "evaluator", "submission"}
         allowed = {
             "discovery": {"get_context", "lookup_listing", "lookup_listings", "record_listing", "record_listing_batch",
+                          "record_discovery_inventory", "get_discovery_inventory",
                           "capture_listing_batch", "lookup_workflow_plan", "save_workflow_plan",
                           "finish_discovery", "ask_question", "request_approval", "checkpoint"},
             "evaluator": {"get_context", "retrieve_sources", "lookup_listing", "lookup_listings",
@@ -5606,6 +5698,19 @@ class Store:
                 return self._agent_save_workflow_plan(db, worker, payload)
             if action == "record_listing":
                 return self._agent_record_listing(db, worker, payload)
+            if action == 'record_discovery_inventory':
+                return self._agent_record_discovery_inventory(db,worker,payload)
+            if action == 'get_discovery_inventory':
+                # Read through this connection: the worker identity is scoped
+                # by its current capability, never supplied in tool arguments.
+                state=payload.get('disposition','unreviewed');offset=payload.get('offset',0);limit=payload.get('limit',50)
+                if state not in {'all','unreviewed','excluded','selected'} or type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=100:
+                    raise ValueError('Choose an inventory state and a page of up to 100 rows.')
+                where='pipeline_id=?';args=[worker['pipeline_id']]
+                if state!='all':where+=' AND disposition=?';args.append(state)
+                rows=[dict(r) for r in db.execute('SELECT * FROM agent_discovery_inventory WHERE '+where+' ORDER BY title,id LIMIT ? OFFSET ?',[*args,limit,offset])]
+                return {'rows':rows,'total':db.execute('SELECT COUNT(*) FROM agent_discovery_inventory WHERE '+where,args).fetchone()[0],
+                        'offset':offset,'limit':limit}
             if action == "record_listing_batch":
                 return self._agent_record_listing_batch(db, worker, payload)
             if action == "capture_listing_batch":
@@ -5616,6 +5721,16 @@ class Store:
                     raise ValueError("Discovery status must be complete, incomplete, or blocked.")
                 detail = str(payload.get("detail") or "")[:4000]
                 coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+                if status=='complete':
+                    from .discovery_inventory import accounting
+                    declared=coverage.get('listing_total',coverage.get('enumerated_total'))
+                    if declared is not None and (type(declared) is not int or declared<0):raise ValueError('The enumerated listing total must be a nonnegative integer.')
+                    audit=accounting(db,worker['pipeline_id'],coverage,worker['id'])
+                    if audit['pass_unreviewed_listings'] or audit['unaccounted_listings'] or audit['pass_historical_exclusions']:
+                        raise Conflict('Discovery cannot complete while listing accounting is unresolved: '
+                            f"{audit['pass_unreviewed_listings']} unreviewed, {audit['unaccounted_listings']} missing from this pass, "
+                            f"{audit['pass_historical_exclusions']} historical exclusions without individual reasons. "
+                            'Save each observed identity and each actual filter exclusion; selected roles need complete JDs.')
                 now = timestamp()
                 continuation = None
                 if status == "incomplete":
@@ -6521,6 +6636,8 @@ class Store:
                 result["sections"]["submission_history"] = []
         if "discovery_frontier" in sections:
             result["sections"]["discovery_frontier"] = self._agent_pipeline_context(pipeline)["discovery"]
+            from .discovery_inventory import summary
+            result['sections']['discovery_frontier']['inventory']=summary(db,worker['pipeline_id'])
         if "parent_context" in sections:
             parent = db.execute("SELECT context FROM agent_workers WHERE id=? AND parent_id IS NULL",
                                 (worker["parent_id"],)).fetchone() if worker["parent_id"] else None

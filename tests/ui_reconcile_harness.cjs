@@ -3,6 +3,17 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(process.argv[2], 'utf8');
+const visibilityScope = {};
+const visibilityStart = source.indexOf('function jobRecordVisible(');
+const visibilityEnd = source.indexOf('\nfunction statusLabel(', visibilityStart);
+assert(visibilityStart >= 0 && visibilityEnd > visibilityStart);
+vm.runInNewContext(source.slice(visibilityStart, visibilityEnd) + '\nglobalThis.visible = jobRecordVisible;', visibilityScope);
+for (const job of [{fit_score: 90}, {fit_score: null}, {phase: 'new', agent_decision: 'apply'}, {phase: 'discarded'}]) {
+  assert.equal(visibilityScope.visible(job), true, 'unsubmitted scored, unscored and legacy records stay visible');
+}
+for (const job of [{phase: 'submitted'}, {agent_status: 'submitted'}, {phase: 'new', has_submission_receipt: true}]) {
+  assert.equal(visibilityScope.visible(job), false, 'a submitted status or actual receipt hides a job record');
+}
 const bindStart = source.indexOf('const bind =');
 const bindEnd = source.indexOf('const button =', bindStart);
 const toggleScope = {};

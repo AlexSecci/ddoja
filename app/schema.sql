@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS pipelines(
  created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS pipelines_company_created ON pipelines(company_id,created_at);
+
+-- Listing identities are separate from full JD records. Unreviewed items must
+-- not disappear merely because discovery decided not to open their details.
+CREATE TABLE IF NOT EXISTS agent_discovery_inventory(
+ id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL REFERENCES pipelines(id),
+ requisition_id TEXT, url TEXT NOT NULL, title TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
+ disposition TEXT NOT NULL CHECK(disposition IN ('unreviewed','selected','excluded')),
+ reason TEXT NOT NULL DEFAULT '', decision_source TEXT NOT NULL DEFAULT 'observation', job_id TEXT REFERENCES jobs(id),
+ worker_id TEXT REFERENCES agent_workers(id), source_event_id TEXT REFERENCES agent_runtime_events(id),
+ source_page TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(pipeline_id,url)
+);
+CREATE INDEX IF NOT EXISTS discovery_inventory_pending ON agent_discovery_inventory(pipeline_id,disposition);
 CREATE TABLE IF NOT EXISTS pipeline_jobs(
  pipeline_id TEXT NOT NULL REFERENCES pipelines(id), job_id TEXT NOT NULL REFERENCES jobs(id),
  discovered_at TEXT NOT NULL, selected INTEGER NOT NULL DEFAULT 1,

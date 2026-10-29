@@ -110,6 +110,18 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
             "selection_reason": _TEXT, "observation": _OBJ,
         }, ("url", "title", "jd", "selected")),
     },
+    "record_discovery_inventory": {
+        "description": "Account for every observed listing, including filter exclusions that do not need a full JD. Greenhouse board identities are captured automatically from native snapshots. Record each actual exclusion with its specific observed filter reason; leave uncertain entries unreviewed and fetch their full JD. This is your semantic decision, never a title keyword classifier. Historical generic exclusions are not verified reasons.",
+        "inputSchema": _object({"listings":{"type":"array","minItems":1,"maxItems":50,"items":_object({
+            "url":_TEXT,"title":_TEXT,"requisition_id":_TEXT,"location":_TEXT,
+            "disposition":{"type":"string","enum":["unreviewed","excluded"]},"reason":_TEXT},("url","disposition"))}},("listings",)),
+    },
+    "get_discovery_inventory": {
+        "description":"Read this campaign's observed listing identities and saved decisions. Unreviewed entries need a JD/selection decision; historical_report exclusions lack individual reasons. No applicant data is returned.",
+        "inputSchema":_object({"disposition":{"type":"string","enum":["all","unreviewed","selected","excluded"]},
+            "offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}}),
+        "annotations":{"readOnlyHint":True},
+    },
     "record_listing_batch": {
         "description": "Atomically record up to 10 listings observed and interpreted by discovery. Each item needs title, exact URL, full observed description, and the agent's selected decision. Serialized batch size is limited to 1 MiB.",
         "inputSchema": _object({"listings": {"type": "array", "items": _LISTING_RECORD,
@@ -213,6 +225,7 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
 
 ROLE_TOOLS: dict[str, tuple[str, ...]] = {
     "discovery": ("get_context", "get_browser_guidance", "lookup_listing", "lookup_listings", "capture_listing_batch",
+                  "record_discovery_inventory", "get_discovery_inventory",
                   "record_listing", "record_listing_batch", "finish_discovery",
                   "ask_question", "checkpoint", "request_approval", "lookup_workflow_plan", "save_workflow_plan", "browser_control"),
     "evaluator": ("get_context", "get_browser_guidance", "lookup_listing", "lookup_listings", "retrieve_sources", "update_job_description", "ask_question",

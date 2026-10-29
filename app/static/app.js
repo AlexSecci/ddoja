@@ -11,6 +11,8 @@ let pipelineJobs = new Map();
 let pipelineInboxes = new Map();
 let workerRecords = new Map();
 let expandedPipelines = new Set();
+const discoveryInventories = new Map();
+const expandedDiscoveryInventories = new Set();
 let expandedLegacy = new Set();
 let expandedWorkers = new Set();
 let expandedFinishedWorkers = new Set();
@@ -287,6 +289,10 @@ function completionOf(view) {
     discoveryDone: discovery.status === 'complete',
     complete: p.status === 'completed' && discovery.status === 'complete' && selectedPresent && resolved === count(c.selected),
   };
+}
+
+function jobRecordVisible(job) {
+  return job.phase !== 'submitted' && job.agent_status !== 'submitted' && !job.has_submission_receipt;
 }
 function statusLabel(view) {
   const p = pipelineOf(view), completion = completionOf(view);
@@ -676,7 +682,8 @@ function renderPipeline(view) {
   if (p.adopted_from) card.append(withRenderKey(element('p', 'New agentic evaluation of historical job ' + p.adopted_from + '; previous run remains unchanged.', 'sub'), 'adopted-from'));
   const metrics = withRenderKey(element('div', undefined, 'pipeline-metrics'), 'metrics');
   [
-    ['Discovered', c.discovered],
+    ['Discovered · all recorded identities', c.discovered],
+    ['Full JD records', c.full_jd_records ?? c.discovered],
     ['Selected for evaluation', c.selected],
     ['Evaluated', c.evaluated],
     ['Eligible for application', c.accepted ?? c.approved],
@@ -685,8 +692,14 @@ function renderPipeline(view) {
     ['Discarded', c.discarded],
     ['Submitted with evidence', c.submitted],
     ['Excluded by filters', c.excluded],
+    ['Filter decision pending', c.unreviewed_listings ?? 0],
   ].forEach(([label, value]) => metrics.append(metric(label, value)));
   card.append(metrics);
+  const accounting = discovery.accounting || {};
+  if (accounting.reported_listing_total != null) card.append(element('p', 'Last reported board total: ' + accounting.reported_listing_total + '. Totals above retain listings from all passes.', 'sub'));
+  if (count(c.historical_exclusions)) card.append(element('p', count(c.historical_exclusions) + ' exclusions were recovered from the prior discovery report. Their individual filter reasons were not saved; inventory marks them as historical reports.', 'sub'));
+  if (count(accounting.unaccounted_listings)) card.append(element('p', count(accounting.unaccounted_listings) + ' reported listings still have no identity in this pass.', 'worker-error'));
+  if (p.mode === 'agentic') card.append(renderDiscoveryInventory(p));
   const outcomes = withRenderKey(element('div', undefined, 'outcome-counts'), 'outcomes');
   [
     ['Recruiter pending', c.recruiter_pending], ['Rejected', c.recruiter_rejected],
@@ -799,7 +812,7 @@ function renderPipeline(view) {
   if (p.mode === 'agentic' && p.status !== 'completed') {
     ['discovery', 'evaluation', 'submission'].forEach(stage => {
       const campaignStopped = Boolean(p.stop_requested) || p.status === 'stopped';
-      const paused = campaignStopped || Boolean(p[stage + '_paused']);
+      const paused = campaignStopped || Boolean(p[stage + '_paused']) || (stage === 'discovery' && p.discovery_status === 'complete');
       const control = button((paused ? 'Start ' : 'Stop ') + stage, 'quiet-button', async () => {
         try {
           await api('pipelines/' + segment(p.id) + '/dispatch', {method: 'POST', body: JSON.stringify({stage, paused: !paused})});
@@ -832,16 +845,76 @@ function renderPipeline(view) {
   if (expandedPipelines.has(p.id)) card.append(renderPipelineJobs(p, view));
   return card;
 }
+function renderDiscoveryInventory(p) {
+  const detail = withRenderKey(element('details', undefined, 'discovery-detail'), 'discovery-inventory:' + p.id);
+  detail.open = expandedDiscoveryInventories.has(p.id);
+  detail.append(element('summary', 'Discovery inventory · selected and excluded listings'));
+  bind(detail, 'toggle', async event => {
+    if (event.currentTarget.open) {
+      expandedDiscoveryInventories.add(p.id);
+      if (!discoveryInventories.has(p.id)) await loadDiscoveryInventory(p.id);
+    } else expandedDiscoveryInventories.delete(p.id);
+    renderPipelines();
+  });
+  if (!detail.open) return detail;
+  const saved = discoveryInventories.get(p.id);
+  if (!saved) { detail.append(element('p', 'Loading listing identities…')); return detail; }
+  if (saved.error) detail.append(element('p', saved.error, 'worker-error'));
+  const controls = element('div', undefined, 'pipeline-actions'), filter = element('select');
+  filter.setAttribute('aria-label', 'Discovery inventory decision');
+  [['all', 'All listings'], ['unreviewed', 'Needs filter review'], ['excluded', 'Excluded by filters'], ['selected', 'Selected for evaluation']].forEach(([value, label]) => {
+    const option = element('option', label); option.value = value; filter.append(option);
+  });
+  filter.value = saved.disposition || 'all';
+  filter.onchange = async event => { await loadDiscoveryInventory(p.id, 0, event.currentTarget.value); renderPipelines(); };
+  controls.append(filter, button('Refresh inventory', 'small-button', async () => {
+    await loadDiscoveryInventory(p.id, saved.offset, saved.disposition); renderPipelines();
+  }));
+  const previous = button('Previous', 'small-button', async () => { await loadDiscoveryInventory(p.id, Math.max(0, saved.offset - 50), saved.disposition); renderPipelines(); });
+  const next = button('Next', 'small-button', async () => { await loadDiscoveryInventory(p.id, saved.offset + 50, saved.disposition); renderPipelines(); });
+  previous.disabled = !saved.offset; next.disabled = saved.offset + saved.limit >= saved.total;
+  controls.append(previous, next, element('span', saved.total ? (saved.offset + 1) + '–' + Math.min(saved.offset + saved.limit, saved.total) + ' of ' + saved.total : 'No saved inventory rows', 'sub'));
+  detail.append(controls);
+  const table = element('table'), head = element('thead'), header = element('tr');
+  ['Listing', 'Discovery decision', 'Full JD'].forEach(label => header.append(element('th', label)));
+  head.append(header); table.append(head);
+  const body = element('tbody');
+  (saved.rows || []).forEach(item => {
+    const row = withRenderKey(element('tr'), 'inventory:' + item.id), title = element('td'), decision = element('td');
+    title.append(externalLink(item.title, item.url), element('p', [item.requisition_id, item.location].filter(Boolean).join(' · '), 'sub'));
+    const historical = item.decision_source === 'historical_report';
+    decision.append(element('strong', historical ? 'Excluded · historical report' : humanize(item.disposition)));
+    if (item.reason) decision.append(element('p', item.reason, 'sub'));
+    row.append(title, decision, element('td', item.job_id ? 'Saved' : item.disposition === 'excluded' ? 'Not captured · filtered out' : 'Pending review'));
+    body.append(row);
+  });
+  table.append(body); const wrap = element('div', undefined, 'table-wrap'); wrap.append(table); detail.append(wrap);
+  return detail;
+}
+
+async function loadDiscoveryInventory(id, offset = 0, disposition = 'all') {
+  const key = 'inventory:' + id, requestId = (panelRequestIds.get(key) || 0) + 1;
+  panelRequestIds.set(key, requestId);
+  const revision = dataRevision;
+  try {
+    const result = await api('pipelines/' + segment(id) + '/discovery-inventory?offset=' + offset + '&limit=50&disposition=' + encodeURIComponent(disposition));
+    if (panelRequestIds.get(key) !== requestId || revision !== dataRevision || !expandedDiscoveryInventories.has(id)) return;
+    discoveryInventories.set(id, { ...result, disposition });
+  } catch (error) {
+    if (panelRequestIds.get(key) === requestId && revision === dataRevision) discoveryInventories.set(id, { ...(discoveryInventories.get(id) || { rows: [], total: 0, offset: 0, limit: 50 }), error: error.message });
+  }
+}
+
 function renderPipelineJobs(p, view) {
   const section = withRenderKey(element('section', undefined, 'pipeline-jobs'), 'pipeline-jobs:' + p.id);
-  section.append(element('h4', 'Listing and per-job records · highest fit first'));
+  section.append(element('h4', 'Unsubmitted job records · highest fit first'));
   section.append(element('p', 'Fit is scored from 0–100, not a hiring probability. All positive eligible scores are kept; 0 is not submitted. Each free submission slot takes the highest score currently available; started applications finish normally.', 'sub'));
   const saved = pipelineJobs.get(p.id);
   if (!saved) { section.append(element('p', 'Loading saved job records…', 'empty-state')); return section; }
   if (saved.error) section.append(element('p', 'Some saved listing data could not refresh: ' + saved.error, 'worker-error'));
-  const rows = saved.jobs || [];
+  const rows = (saved.jobs || []).filter(jobRecordVisible);
   if (!rows.length) {
-    section.append(element('p', 'No listing records yet. Discovery may still be exploring this company site.', 'empty-state'));
+    section.append(element('p', 'No unsubmitted job records.', 'empty-state'));
     return section;
   }
   const wrap = element('div', undefined, 'table-wrap'), table = element('table');
@@ -1029,7 +1102,7 @@ async function loadPipelineJobs(id) {
   panelRequestIds.set(key, requestId);
   const revision = dataRevision;
   try {
-    const result = await api('pipelines/' + segment(id) + '/jobs');
+    const result = await api('pipelines/' + segment(id) + '/jobs?view=backlog');
     if (panelRequestIds.get(key) !== requestId || revision !== dataRevision
         || (!expandedPipelines.has(id) && !expandedLegacy.has(id))) return;
     pipelineJobs.set(id, result);
@@ -1659,6 +1732,10 @@ async function refreshPipelineDetails(sequence, revision) {
     }
     if (currentView === 'pipelines' && expandedPipelines.has(p.id)) {
       requests.push(loadPipelineJobs(p.id));
+    }
+    if (currentView === 'pipelines' && expandedDiscoveryInventories.has(p.id)) {
+      const saved = discoveryInventories.get(p.id) || {};
+      requests.push(loadDiscoveryInventory(p.id, saved.offset || 0, saved.disposition || 'all'));
     }
     if (currentView === 'pipelines' && expandedRuntime.has(p.id)) {
       requests.push(loadRuntimeStatus(p.id));

@@ -749,7 +749,7 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
         return FileResponse(path, media_type=media_type, filename=filename)
 
     @app.get("/api/pipelines/{pipeline_id}/jobs")
-    def pipeline_jobs(pipeline_id: str):
+    def pipeline_jobs(pipeline_id: str, view: Literal['all','backlog']='all'):
         pipeline = store.get_pipeline(pipeline_id)
         payload = store.pipeline_jobs(pipeline_id)
         allowed = ("id", "company_id", "title", "url", "location", "country", "employment", "arrangement",
@@ -762,11 +762,18 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
                    "fit_assessment", "fit_jd_version", "fit_profile_version")
         rows = []
         for job in payload["jobs"]:
+            if view=='backlog' and (job.get('phase')=='submitted' or job.get('agent_status')=='submitted' or job.get('has_submission_receipt')):
+                continue
             row = {key: job.get(key) for key in allowed}
+            row['has_submission_receipt']=bool(job.get('has_submission_receipt'))
             if pipeline.get("mode") == "legacy":
                 row["adoption"] = store.agent_adoption_eligibility(pipeline_id, job["id"])
             rows.append(row)
         return {"pipeline_id": pipeline_id, "jobs": rows}
+
+    @app.get('/api/pipelines/{pipeline_id}/discovery-inventory')
+    def discovery_inventory(pipeline_id: str, disposition: str='all', offset: int=0, limit: int=50):
+        return store.discovery_inventory(pipeline_id,disposition=disposition,offset=offset,limit=limit)
 
     @app.post("/api/pipelines/{pipeline_id}/stop")
     def stop_pipeline(pipeline_id: str):
