@@ -4,7 +4,7 @@ import json
 import pytest
 
 from app.provider_telemetry import scoped_tools,native_worker_tools,fingerprint
-from app.agent_runtime import CodexAgentRuntime
+from app.agent_runtime import CodexAgentRuntime,_final_response
 from app.browser_sessions import BrowserSessions
 from test_agent_pipeline_manager import _begin_isolated_discovery_turn, _record_unselected_discovery_listing
 from test_agent_runtime import _runtime_root, _task
@@ -89,6 +89,26 @@ def test_deepseek_prompt_routes_to_direct_mcp_without_native_tool_search(tmp_pat
     prompt=runtime._prompt(task,task['worker'])
     assert prompt.startswith('TOOL ROUTING: Your exact role MCP schemas are supplied directly.')
     assert 'Do not use tool_search' in prompt
+
+
+@pytest.mark.parametrize('disposition',['completed','waiting'])
+def test_explicit_final_json_paragraph_after_summary_is_not_lost(disposition):
+    value={'disposition':disposition,'checkpoint':'current durable checkpoint','summary':'Actual outcome.'}
+    text='Current documents are ready. No application receipt is claimed.\n\n'+json.dumps(value)
+    event={'type':'item.completed','item':{'type':'agent_message','text':text}}
+    assert _final_response(event)==value
+
+
+@pytest.mark.parametrize('text',[
+    'Everything is done, no structured report.',
+    'Inline example: {"disposition":"completed","checkpoint":"done","summary":"example"}',
+    'Summary.\n\n{"disposition":"completed","checkpoint":"done","summary":"x","extra":true}',
+    'Summary.\n\n{"disposition":"completed","checkpoint":"done","summary":"x"}\nMore prose.',
+    '{"disposition":"completed","checkpoint":"first","summary":"x"}\n\n{"disposition":"waiting","checkpoint":"second","summary":"y"}',
+    '<DSML invoke="finish_submission">No executable call</DSML>',
+])
+def test_final_report_parser_still_rejects_prose_examples_extra_fields_and_ambiguous_reports(text):
+    assert _final_response({'type':'item.completed','item':{'type':'agent_message','text':text}}) is None
 
 
 @pytest.mark.parametrize('session_state,has_observation,expected',[

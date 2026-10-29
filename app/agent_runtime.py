@@ -185,25 +185,34 @@ def _final_response(event: dict[str, Any]) -> dict[str, Any] | None:
     text = item.get("text")
     if not isinstance(text, str):
         return None
+
+    def valid(value):
+        return (isinstance(value, dict) and value.get("disposition") in {"completed", "waiting"}
+                and set(value) == {"disposition", "checkpoint", "summary"}
+                and isinstance(value.get("checkpoint"), str)
+                and isinstance(value.get("summary"), str))
+
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
-        # Some Responses-compatible providers wrap structured output in one
-        # trailing JSON fence despite the schema. Accept only that explicit
-        # envelope, never scrape arbitrary prose or infer task success.
+        # Some providers put the explicit final report after a summary, either
+        # in a single JSON fence or as a separate final JSON paragraph. Accept
+        # only the exact schema, never derive an outcome from the prose.
         blocks = re.findall(r"```(?:json)?\s*\n([\s\S]*?)\n```", text)
-        if len(blocks) != 1 or not text.rstrip().endswith("```"):
-            return None
-        try:
-            value = json.loads(blocks[0])
-        except json.JSONDecodeError:
-            return None
-    if (isinstance(value, dict) and value.get("disposition") in {"completed", "waiting"}
-            and set(value) == {"disposition", "checkpoint", "summary"}
-            and isinstance(value.get("checkpoint"), str)
-            and isinstance(value.get("summary"), str)):
-        return value
-    return None
+        if blocks:
+            if len(blocks) != 1 or not text.rstrip().endswith("```"):return None
+            try:value = json.loads(blocks[0])
+            except json.JSONDecodeError:return None
+        else:
+            reports=[]
+            for match in re.finditer(r'(?:\A|\n[ \t]*\n)[ \t]*(?=\{)',text):
+                start=match.end()
+                try:candidate,end=json.JSONDecoder().raw_decode(text,start)
+                except json.JSONDecodeError:continue
+                if valid(candidate):reports.append((candidate,end))
+            if len(reports)!=1 or text[reports[0][1]:].strip():return None
+            value=reports[0][0]
+    return value if valid(value) else None
 
 
 class CodexAgentRuntime:
