@@ -29,7 +29,6 @@
   ],
   "efficiency": {
     "max_concurrent_form_writers": 1,
-    "max_approved_backlog": 6,
     "max_discovery_backlog": 12
   }
 }

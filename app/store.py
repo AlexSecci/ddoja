@@ -56,6 +56,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "prepared_documents", "inbox_history", "current_approved_actions",
     "first_application_review_required", "parent_context", "snapshot_supersession",
     "profile_refresh_supersession",
+    "fit_score", "evaluation_scoring_version", "evaluation_jd_version", "evaluation_profile_version",
     "discovery_turn_baseline", "last_context_revision", "browser_wait_scope", "instruction_digest",
     "reconciliation_recovery", "execution", "execution_history", "execution_handoff", "execution_change_deferred",
     "email_verification_final_scope",
@@ -147,6 +148,71 @@ class Store:
         # A preferences change never schedules, resumes, stops or replaces work.
         return self.get_worker_settings()
 
+    def queue_legacy_rescoring(self, pipeline_id):
+        """Queue fresh assessments of safe unsent legacy jobs, preserving history.
+
+        This never resumes a stopped campaign. Submitted/uncertain/terminal
+        application results, active work and pending action approvals are excluded.
+        """
+        with self.connect(write=True) as db:
+            pipeline = db.execute("SELECT mode FROM pipelines WHERE id=?", (pipeline_id,)).fetchone()
+            if not pipeline or pipeline["mode"] != "agentic":
+                raise Conflict("Legacy re-scoring requires an agentic campaign.")
+            rows = db.execute(
+                "SELECT pj.job_id FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
+                "WHERE pj.pipeline_id=? AND pj.selected=1 AND pj.manual_discard_reason='' "
+                "AND pj.fit_score IS NULL AND pj.agent_decision IN ('approve','discard') "
+                "AND j.phase!='submitted' AND j.run_status!='submission_uncertain' "
+                "AND pj.agent_status NOT IN ('submitted','uncertain') "
+                "AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=j.id AND e.kind='receipt') "
+                "AND NOT EXISTS(SELECT 1 FROM agent_submission_results r WHERE r.job_id=j.id "
+                "AND r.state IN ('submitted','uncertain','discarded')) "
+                "AND NOT EXISTS(SELECT 1 FROM agent_workers w WHERE w.job_id=j.id AND (w.turn_active=1 OR w.state='running')) "
+                "AND NOT EXISTS(SELECT 1 FROM agent_inbox i WHERE i.job_id=j.id AND i.state='pending') "
+                "ORDER BY pj.discovered_at,pj.job_id", (pipeline_id,)).fetchall()
+            queued = []
+            for row in rows:
+                workers = db.execute("SELECT * FROM agent_workers WHERE job_id=?", (row["job_id"],)).fetchall()
+                if any(w["role"] == "submission" and self._context_may_have_sent_final(
+                        self._agent_decode(w["context"], {}), w["checkpoint"]) for w in workers):
+                    continue
+                new_id = self._agent_insert_worker(db, pipeline_id, "evaluator", job_id=row["job_id"],
+                    context={"legacy_fit_rescore": True, "operator_instructions":
+                        "Reassess the complete JD against current confirmed applicant facts using the honest 0–100 rubric. "
+                        "The older binary verdict is historical, not a target score or evidence. Do not anchor on it. "
+                        "Score actual core fit and record material gaps. Do not submit or generate documents."})
+                for old in workers:
+                    if (old["pipeline_id"] != pipeline_id or old["state"] in {"completed", "discarded", "uncertain", "superseded"}):
+                        continue
+                    context = self._agent_decode(old["context"], {})
+                    context["snapshot_supersession"] = {"replacement_worker_id": new_id,
+                        "reason": "Legacy binary evaluation replaced by a scored assessment."}
+                    db.execute("UPDATE agent_workers SET state='superseded',context=?,turn_active=0,"
+                               "capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",
+                               (json.dumps(context),timestamp(),old["id"]))
+                db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected' "
+                           "WHERE pipeline_id=? AND job_id=?", (pipeline_id,row["job_id"]))
+                # An old evaluation rejection is not a confirmed closed application.
+                # Actual terminal application results were excluded above.
+                db.execute("UPDATE jobs SET phase='new' WHERE id=? AND phase='discarded'", (row["job_id"],))
+                queued.append({"job_id": row["job_id"], "worker_id": new_id})
+            if queued:
+                self.event(db,"agent.legacy_rescoring_queued",{"pipeline_id":pipeline_id,"jobs":queued},actor="user")
+                self._agent_refresh_pipeline(db,pipeline_id)
+            return {"pipeline_id":pipeline_id,"queued":queued,"count":len(queued)}
+
+    def set_stage_dispatch(self, pipeline_id, stage, paused):
+        if stage not in {"evaluation", "submission"} or type(paused) is not bool:
+            raise ValueError("Choose evaluation or submission and a boolean pause state.")
+        with self.connect(write=True) as db:
+            pipeline = db.execute("SELECT mode FROM pipelines WHERE id=?",(pipeline_id,)).fetchone()
+            if not pipeline or pipeline["mode"] != "agentic":
+                raise Conflict("Stage dispatch controls require an agentic campaign.")
+            db.execute(f"UPDATE pipelines SET {stage}_paused=?,updated_at=? WHERE id=?",(int(paused),timestamp(),pipeline_id))
+            self.event(db,"agent.stage_dispatch_changed",{"pipeline_id":pipeline_id,"stage":stage,"paused":paused},actor="user")
+            self._agent_refresh_pipeline(db,pipeline_id)
+        return self.get_pipeline(pipeline_id)
+
     def __init__(self, root):
         self.root = Path(root).resolve()
         (self.root / "data").mkdir(parents=True, exist_ok=True)
@@ -163,15 +229,22 @@ class Store:
                     ("manual_discarded_at", "TEXT"),
                     ("agent_decision", "TEXT NOT NULL DEFAULT ''"),
                     ("agent_reason", "TEXT NOT NULL DEFAULT ''"),
-                    ("agent_status", "TEXT NOT NULL DEFAULT ''")):
+                    ("agent_status", "TEXT NOT NULL DEFAULT ''"),
+                    ("fit_score", "INTEGER CHECK(fit_score BETWEEN 0 AND 100)"),
+                    ("fit_payload", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("fit_jd_version", "INTEGER"),
+                    ("fit_profile_version", "INTEGER")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE pipeline_jobs ADD COLUMN {name} {declaration}")
             pipeline_columns = {row[1] for row in db.execute("PRAGMA table_info(pipelines)")}
+            db.execute("CREATE INDEX IF NOT EXISTS pipeline_jobs_fit ON pipeline_jobs(pipeline_id,fit_profile_version,fit_jd_version,fit_score DESC)")
             for name, declaration in (
                     ("mode", "TEXT NOT NULL DEFAULT 'legacy'"),
                     ("adopted_from_pipeline_id", "TEXT"),
                     ("agent_test_only", "INTEGER NOT NULL DEFAULT 0"),
-                    ("dashboard_hidden", "INTEGER NOT NULL DEFAULT 0")):
+                    ("dashboard_hidden", "INTEGER NOT NULL DEFAULT 0"),
+                    ("evaluation_paused", "INTEGER NOT NULL DEFAULT 0"),
+                    ("submission_paused", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in pipeline_columns:
                     db.execute(f"ALTER TABLE pipelines ADD COLUMN {name} {declaration}")
             worker_columns = {row[1] for row in db.execute("PRAGMA table_info(agent_workers)")}
@@ -433,6 +506,8 @@ class Store:
         result["careers_url"] = company["careers_url"] if company else ""
         result["stop_requested"] = bool(result["stop_requested"])
         result["dashboard_hidden"] = bool(result.get("dashboard_hidden", 0))
+        result["evaluation_paused"] = bool(result.get("evaluation_paused", 0))
+        result["submission_paused"] = bool(result.get("submission_paused", 0))
         result["counts"] = (self._agent_pipeline_counts(db, result["id"])
                             if result.get("mode") == "agentic" else self._pipeline_counts(db, result["id"]))
         return result
@@ -648,14 +723,22 @@ class Store:
             pipeline = db.execute("SELECT mode FROM pipelines WHERE id=?", (pipeline_id,)).fetchone()
             if not pipeline:
                 raise KeyError(pipeline_id)
+            current_profile_version = self.profile_version(db)
             rows = db.execute("SELECT j.*,o.status AS application_status,o.provenance AS application_provenance,"
-                              "pj.agent_decision,pj.agent_reason,pj.agent_status "
+                              "pj.agent_decision,pj.agent_reason,pj.agent_status,"
+                              "pj.fit_score,pj.fit_payload,pj.fit_jd_version,pj.fit_profile_version "
                               "FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
                               "LEFT JOIN application_outcomes o ON o.job_id=j.id "
-                              "WHERE pj.pipeline_id=? ORDER BY pj.discovered_at,j.first_seen_at,j.id", (pipeline_id,)).fetchall()
+                              "WHERE pj.pipeline_id=? ORDER BY (pj.fit_jd_version=j.jd_version AND pj.fit_profile_version=?) DESC,"
+                              "pj.fit_score DESC,pj.discovered_at,j.first_seen_at,j.id", (pipeline_id,current_profile_version)).fetchall()
             result = []
             for row in rows:
                 job = dict(row)
+                job["fit_current"] = (job["fit_score"] is not None and job["fit_jd_version"] == job["jd_version"]
+                                      and job["fit_profile_version"] == current_profile_version)
+                job["fit_assessment"] = self._agent_decode(job.pop("fit_payload"), {}) if job["fit_current"] else None
+                if not job["fit_current"]:
+                    job["fit_score"] = None
                 membership = db.execute("SELECT selected,excluded_reason,manual_discard_reason,manual_discard_provenance,"
                                         "manual_discard_actor,manual_discarded_at FROM pipeline_jobs WHERE pipeline_id=? AND job_id=?",
                                         (pipeline_id, job["id"])).fetchone()
@@ -833,7 +916,7 @@ class Store:
                             "current_snapshot": audit["current_snapshot"],
                             "provenance": provenance.strip()}, job_id, "profile_refresh")
 
-            db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected' "
+            db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected',fit_score=NULL,fit_payload='{}',fit_jd_version=NULL,fit_profile_version=NULL "
                        "WHERE pipeline_id=? AND job_id=? AND selected=1", (pipeline_id, job_id))
             evaluator_worker_id = self._agent_insert_worker(
                 db, pipeline_id, "evaluator", job_id=job_id,
@@ -2104,20 +2187,31 @@ class Store:
         return self.get_pipeline(pipeline_id)
 
     def _agent_pipeline_counts(self, db, pipeline_id):
-        rows = db.execute("SELECT pj.selected,pj.agent_decision,pj.agent_status,j.id,j.phase,j.run_status,"
+        current_profile_version = self.profile_version(db)
+        rows = db.execute("SELECT pj.selected,pj.agent_decision,pj.agent_status,pj.manual_discard_reason,j.id,j.phase,j.run_status,j.jd_version,"
+                          "pj.fit_score,pj.fit_jd_version,pj.fit_profile_version,pj.fit_payload,"
                           "o.status AS application_status FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
                           "LEFT JOIN application_outcomes o ON o.job_id=j.id WHERE pj.pipeline_id=?",
                           (pipeline_id,)).fetchall()
         counts = {key: 0 for key in ("discovered", "selected", "excluded", "evaluated", "accepted",
                                       "discarded", "submitted", "awaiting_user", "uncertain",
                                       "recruiter_pending", "recruiter_rejected", "recruiter_accepted",
-                                      "recruiter_unknown")}
+                                      "recruiter_unknown", "scored", "scored_backlog")}
         counts["discovered"] = len(rows)
         for row in rows:
             if not row["selected"]:
                 counts["excluded"] += 1
                 continue
             counts["selected"] += 1
+            if (row["fit_score"] is not None and row["fit_jd_version"] == row["jd_version"]
+                    and row["fit_profile_version"] == current_profile_version):
+                counts["scored"] += 1
+                if (row["fit_score"] > 0 and self._agent_decode(row["fit_payload"], {}).get("eligibility") == "eligible"
+                        and not row["manual_discard_reason"]
+                        and row["phase"] not in {"submitted", "discarded"}
+                        and row["agent_status"] not in {"submitted", "uncertain", "discarded"}
+                        and row["run_status"] != "submission_uncertain"):
+                    counts["scored_backlog"] += 1
             decision = row["agent_decision"]
             if decision in {"approve", "discard"}:
                 counts["evaluated"] += 1
@@ -2922,7 +3016,8 @@ class Store:
                                                 "company_id": pipeline["company_id"],
                                                 "adopted_from_pipeline_id": None})
         career_scope = self._agent_career_scope()
-        policy = {"career_scope": career_scope, "filters": filters,
+        from .fit_scoring import SCORING_VERSION
+        policy = {"career_scope": career_scope, "filters": filters, "fit_scoring_version": SCORING_VERSION, "submit_positive_scores": True,
                   "evaluation_prompt_sha256": prompt_hash}
         snapshot = {"job_id": job["id"], "company_id": pipeline["company_id"],
                     "external_key": job["external_key"],
@@ -2952,7 +3047,13 @@ class Store:
             return None
         cached = self._agent_decode(row["payload"], {})
         decision = row["decision"]
-        if decision not in {"approve", "discard"} or not isinstance(cached, dict):
+        from .fit_scoring import assessment, submission_candidate, SCORING_VERSION
+        try:
+            fit = assessment(cached) if isinstance(cached, dict) and cached.get("scoring_version") == SCORING_VERSION else None
+        except ValueError:
+            fit = None
+        if (fit is None or decision not in {"approve", "discard"}
+                or decision != ("approve" if submission_candidate(fit) else "discard")):
             db.execute("INSERT INTO agent_cache_observations(pipeline_id,worker_id,cache_kind,hit,cache_key,created_at) "
                        "VALUES(?,NULL,'evaluation',0,?,?)", (pipeline_id, cache_key, timestamp()))
             return None
@@ -2965,14 +3066,12 @@ class Store:
         state = "completed" if decision == "approve" else "discarded"
         db.execute("UPDATE agent_workers SET state=?,result=?,completed_at=?,updated_at=? WHERE id=?",
                    (state, json.dumps(result, ensure_ascii=False), timestamp(), timestamp(), worker_id))
-        db.execute("UPDATE pipeline_jobs SET agent_decision=?,agent_reason=?,agent_status=? WHERE pipeline_id=? AND job_id=?",
+        db.execute("UPDATE pipeline_jobs SET agent_decision=?,agent_reason=?,agent_status=?,"
+                   "fit_score=?,fit_payload=?,fit_jd_version=?,fit_profile_version=? WHERE pipeline_id=? AND job_id=?",
                    (decision, str(cached.get("reason") or "")[:12000],
-                    "approved" if decision == "approve" else "discarded", pipeline_id, job_id))
+                    "approved" if decision == "approve" else "discarded", fit["score"], json.dumps(fit,ensure_ascii=False),
+                    jd_version, self.profile_version(db), pipeline_id, job_id))
         submission_id = None
-        if decision == "approve":
-            submission_id = self._agent_insert_worker(db, pipeline_id, "submission", job_id=job_id,
-                                                      context={"evaluation_worker_id": worker_id,
-                                                               "evaluation_cache_key": snapshot["cache_key"]})
         now = timestamp()
         db.execute("INSERT INTO agent_cache_observations(pipeline_id,worker_id,cache_kind,hit,cache_key,created_at) "
                    "VALUES(?,?,'evaluation',1,?,?)",
@@ -3103,7 +3202,7 @@ class Store:
                            (worker["pipeline_id"], job_id))
             else:
                 if changed:
-                    db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='' WHERE pipeline_id=? AND job_id=?",
+                    db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',fit_score=NULL,fit_payload='{}',fit_jd_version=NULL,fit_profile_version=NULL WHERE pipeline_id=? AND job_id=?",
                                (worker["pipeline_id"], job_id))
                 current_profile = self.profile_version(db)
                 current = db.execute("SELECT id FROM agent_workers WHERE pipeline_id=? AND job_id=? AND role='evaluator' "
@@ -3112,7 +3211,7 @@ class Store:
                                      "ORDER BY created_at DESC LIMIT 1",
                                      (worker["pipeline_id"], job_id, job["jd_version"], current_profile)).fetchone()
                 if not current:
-                    db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected' "
+                    db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected',fit_score=NULL,fit_payload='{}',fit_jd_version=NULL,fit_profile_version=NULL "
                                "WHERE pipeline_id=? AND job_id=? AND agent_status NOT IN ('submitted','uncertain')",
                                (worker["pipeline_id"], job_id))
                     db.execute("UPDATE agent_workers SET state='interrupted',error='Snapshot changed; explicit fresh evaluation is queued.',"
@@ -3781,9 +3880,9 @@ class Store:
     def _agent_capacity_wait(self, db, worker):
         """Backpressure is scheduling, never an assessment or a failed job.
 
-        Retain a small ready queue so slow/broken browser work cannot spend the
-        whole allowance assessing more jobs. Waiting work wakes through the
-        existing completion/answer/resume scheduler, without a model poll.
+        Browser writers retain their capacity limits. Discovery may buffer
+        behind pending evaluations; submission backlog never throttles offline
+        assessment. Ordinary completion/answer/resume events wake saved work.
         """
         # The recovery owner is what releases the downstream queue. Holding it
         # behind that same queue deadlocks an otherwise authorized resume.
@@ -3817,38 +3916,25 @@ class Store:
         trial = read_trial(db, worker["pipeline_id"])
         if trial and trial["state"] == "active":
             return None
-        approved_limit = settings.get("max_approved_backlog", 6)
         discovery_limit = settings.get("max_discovery_backlog", 12)
-        if type(approved_limit) is not int or not 3 <= approved_limit <= 100:
-            approved_limit = 6
         if type(discovery_limit) is not int or not 3 <= discovery_limit <= 500:
             discovery_limit = 12
-        backlog = db.execute("SELECT COUNT(*) FROM agent_workers WHERE pipeline_id=? AND role='submission' "
-                             "AND state NOT IN ('completed','discarded','stopped','superseded')",
-                             (worker["pipeline_id"],)).fetchone()[0]
-        # A known global outage warrants one buffered wave, not an unlimited
-        # series of otherwise valid offline evaluations.
-        circuit = db.execute("SELECT 1 FROM agent_browser_controls WHERE scope_key='connector:cua_repl' "
-                             "AND control_type='connector_circuit' AND state='open'").fetchone()
-        from .worker_settings import read_settings
-        if circuit and read_settings(self.root, db)["roles"]["submission"]["browser_backend"] == "cua":
-            approved_limit = min(approved_limit, 3)
-        if worker["role"] == "evaluator" and backlog >= approved_limit:
-            return {"reason": "Approved applications are waiting for submission capacity.",
-                    "approved_backlog": backlog, "limit": approved_limit}
+        # Evaluation produces a durable ranked backlog independently of slow,
+        # paused or broken submission browsers. Only evaluation buffers discovery.
         if worker["role"] == "discovery":
             pending = db.execute("SELECT COUNT(*) FROM agent_workers WHERE pipeline_id=? AND role='evaluator' "
                                  "AND state NOT IN ('completed','discarded','stopped','superseded')",
                                  (worker["pipeline_id"],)).fetchone()[0]
-            if pending >= discovery_limit and backlog >= approved_limit:
-                return {"reason": "Discovery is buffered behind evaluation and submission work.",
-                        "evaluation_backlog": pending, "approved_backlog": backlog,
+            if pending >= discovery_limit:
+                return {"reason": "Discovery is buffered behind evaluation work.",
+                        "evaluation_backlog": pending,
                         "limit": discovery_limit}
         return None
 
     def reserve_agent_worker(self, worker_id):
         with self.connect(write=True) as db:
-            row = db.execute("SELECT w.*,p.company_id,p.stop_requested,p.status AS pipeline_status,p.mode "
+            row = db.execute("SELECT w.*,p.company_id,p.stop_requested,p.status AS pipeline_status,p.mode,"
+                             "p.evaluation_paused,p.submission_paused "
                              "FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?",
                              (worker_id,)).fetchone()
             if not row:
@@ -3857,6 +3943,17 @@ class Store:
                 return False
             if row["pipeline_status"] in {"stopped", "stopping", "completed"}:
                 return False
+            if row["started_at"] is None and ((row["role"] == "evaluator" and row["evaluation_paused"])
+                                             or (row["role"] == "submission" and row["submission_paused"])):
+                return False
+            if row["role"] == "submission" and row["started_at"] is None and self._agent_decode(row["context"], {}).get("evaluation_scoring_version"):
+                fit = db.execute("SELECT pj.*,j.jd_version FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
+                                 "WHERE pj.pipeline_id=? AND pj.job_id=?",(row["pipeline_id"],row["job_id"])).fetchone()
+                if (not fit or fit["agent_decision"] != "approve" or fit["fit_score"] is None or fit["fit_score"] <= 0
+                        or fit["fit_jd_version"] != fit["jd_version"] or fit["fit_profile_version"] != self.profile_version(db)
+                        or row["jd_version"] != fit["jd_version"] or row["profile_version"] != fit["fit_profile_version"]
+                        or self._agent_decode(fit["fit_payload"], {}).get("eligibility") != "eligible"):
+                    return False
             from .trial_limits import allows as trial_allows
             from .worker_settings import desired_execution
             trial_desired = desired_execution(self.root, db, row)
@@ -3999,6 +4096,8 @@ class Store:
                                 + str(circuit["reason"] or "")]
             elif pipeline["discovery_status"] == "complete" and selected_terminal:
                 status, stage, blockers = "completed", "completed", []
+            elif counts["scored_backlog"] and pipeline["submission_paused"]:
+                status, stage, blockers = "awaiting_user", "submission_paused", ["New submissions are paused; scored jobs remain in the backlog."]
             elif pending_inbox:
                 status, stage, blockers = "awaiting_user", "awaiting_user", ["One or more workers are waiting for a user response."]
             elif any(row["state"] == "waiting_browser" for row in current_workers):
@@ -5347,6 +5446,12 @@ class Store:
                 self._agent_refresh_pipeline(db, worker["pipeline_id"])
                 return result
             if action == "finish_evaluation":
+                from .fit_scoring import assessment, submission_candidate
+                fit = assessment(payload)
+                if fit is not None:
+                    decision = "approve" if submission_candidate(fit) else "discard"
+                    return self._agent_finish_evaluation(db, worker, {**payload, **fit}, decision)
+                # Compatibility with saved pre-scoring worker contracts only.
                 decision = payload.get("decision")
                 if decision not in {"approve", "discard", "ask"}:
                     raise ValueError("Evaluation decision must be approve, discard, or ask.")
@@ -6307,7 +6412,7 @@ class Store:
                    "WHERE id=?", (version, source_url, now, worker["job_id"]))
         db.execute("UPDATE agent_workers SET jd_version=?,updated_at=? WHERE id=?",
                    (version, now, worker["id"]))
-        db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected' "
+        db.execute("UPDATE pipeline_jobs SET agent_decision='',agent_reason='',agent_status='selected',fit_score=NULL,fit_payload='{}',fit_jd_version=NULL,fit_profile_version=NULL "
                    "WHERE pipeline_id=? AND job_id=?", (worker["pipeline_id"], worker["job_id"]))
         self.event(db, "agent.job_description_repaired", {"worker_id": worker["id"], "jd_version": version,
                    "source_url": source_url, "sha256": checksum, "observation": observation},
@@ -6322,18 +6427,23 @@ class Store:
             raise Conflict("Job or applicant snapshot changed during evaluation; resume with fresh context.")
         reason = str(payload.get("reason") or "")[:12000]
         observation = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
-        result = {"decision": decision, "reason": reason, "observations": observation,
+        from .fit_scoring import assessment
+        fit = assessment(payload)
+        result = {**(fit or {}), "decision": decision, "reason": reason, "observations": observation,
                   "jd_version": worker["jd_version"], "profile_version": worker["profile_version"],
                   "worker_id": worker["id"], "completed_at": timestamp()}
         now = timestamp()
         state = "completed" if decision == "approve" else "discarded"
-        db.execute("UPDATE pipeline_jobs SET agent_decision=?,agent_reason=?,agent_status=? WHERE pipeline_id=? AND job_id=?",
+        db.execute("UPDATE pipeline_jobs SET agent_decision=?,agent_reason=?,agent_status=?,"
+                   "fit_score=?,fit_payload=?,fit_jd_version=?,fit_profile_version=? WHERE pipeline_id=? AND job_id=?",
                    (decision, reason, "approved" if decision == "approve" else "discarded",
+                    fit["score"] if fit else None, json.dumps(fit or {},ensure_ascii=False),
+                    worker["jd_version"] if fit else None, worker["profile_version"] if fit else None,
                     worker["pipeline_id"], worker["job_id"]))
         db.execute("UPDATE agent_workers SET state=?,result=?,completed_at=?,updated_at=?,capability_sha256='',"
                    "capability_expires_at=NULL,error='' WHERE id=?",
                    (state, json.dumps(result, ensure_ascii=False), now, now, worker["id"]))
-        if decision in {"approve", "discard"}:
+        if fit is not None:
             cache_snapshot = self._agent_evaluation_cache_snapshot(
                 db, worker["pipeline_id"], worker["job_id"], worker["jd_version"], self._agent_decode(worker["context"], {}).get("execution"))
             if cache_snapshot:
@@ -6352,7 +6462,9 @@ class Store:
                                "cache_key": cache_snapshot["cache_key"], "decision": decision},
                                worker["job_id"], "agent_cache")
         new_worker = None
-        if decision == "approve":
+        if decision == "approve" and fit is None:
+            # An already-pinned legacy worker keeps its historical behavior.
+            # Scored evaluations only publish backlog data; the dispatcher owns admission.
             new_worker = self._agent_insert_worker(db, worker["pipeline_id"], "submission", job_id=worker["job_id"],
                                                    context={"evaluation_worker_id": worker["id"]})
         self.event(db, "agent.evaluation_finished", {**result, "submission_worker_id": new_worker},
@@ -6753,11 +6865,64 @@ class Store:
                 raise KeyError(pipeline_id)
             return bool(row[0])
 
+    def prepare_ranked_submissions(self):
+        """Materialize durable worker records from scored backlog; no model runs here.
+
+        Evaluators and cache hits only publish assessments. This separate consumer
+        owns dispatch and is idempotent across scheduler restarts and callbacks.
+        Actual agents are launched later, under the ordinary role and browser caps.
+        """
+        from .trial_limits import read as read_trial
+        from .fit_scoring import SCORING_VERSION
+        with self.connect(write=True) as db:
+            quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
+            if quota.get("paused"):
+                return []
+            candidates = db.execute(
+                "SELECT pj.*,j.jd_version,p.status AS pipeline_status FROM pipeline_jobs pj "
+                "JOIN jobs j ON j.id=pj.job_id JOIN pipelines p ON p.id=pj.pipeline_id "
+                "WHERE p.mode='agentic' AND p.stop_requested=0 AND p.submission_paused=0 "
+                "AND p.status NOT IN ('stopped','stopping','completed') "
+                "AND pj.selected=1 AND pj.manual_discard_reason='' AND pj.agent_decision='approve' "
+                "AND pj.fit_score>0 AND pj.fit_jd_version=j.jd_version AND pj.fit_profile_version=? "
+                "AND json_extract(pj.fit_payload,'$.eligibility')='eligible' "
+                "AND json_extract(pj.fit_payload,'$.scoring_version')=? "
+                "AND j.phase NOT IN ('submitted','discarded') AND j.run_status!='submission_uncertain' "
+                "AND pj.agent_status NOT IN ('submitted','uncertain','discarded') "
+                "AND NOT EXISTS(SELECT 1 FROM agent_workers w WHERE w.pipeline_id=pj.pipeline_id "
+                "AND w.job_id=pj.job_id AND w.role='submission' AND w.state!='superseded') "
+                "AND NOT EXISTS(SELECT 1 FROM agent_submission_results r WHERE r.job_id=pj.job_id AND r.state='submitted') "
+                "ORDER BY pj.fit_score DESC,pj.discovered_at,pj.job_id", (self.profile_version(db),SCORING_VERSION)).fetchall()
+            created = []
+            for candidate in candidates:
+                trial = read_trial(db, candidate["pipeline_id"])
+                if trial and (trial.get("state") != "active" or trial.get("allowed_worker_ids")
+                              or candidate["job_id"] not in trial["job_ids"]
+                              or (trial.get("allowed_roles") and "submission" not in trial["allowed_roles"])):
+                    continue
+                prior = db.execute("SELECT context,checkpoint FROM agent_workers WHERE job_id=? AND role='submission'",
+                                   (candidate["job_id"],)).fetchall()
+                if any(self._context_may_have_sent_final(self._agent_decode(w["context"], {}),w["checkpoint"]) for w in prior):
+                    continue
+                worker_id = self._agent_insert_worker(db,candidate["pipeline_id"],"submission",job_id=candidate["job_id"],
+                    context={"fit_score":candidate["fit_score"], "evaluation_scoring_version":SCORING_VERSION,
+                             "evaluation_jd_version":candidate["fit_jd_version"],
+                             "evaluation_profile_version":candidate["fit_profile_version"]})
+                created.append(worker_id)
+                self.event(db,"agent.ranked_submission_queued",{"pipeline_id":candidate["pipeline_id"],
+                    "worker_id":worker_id,"score":candidate["fit_score"]},candidate["job_id"],"agent_scheduler")
+            return created
+
     def list_queued_agent_workers(self):
         with self.connect() as db:
             rows = db.execute("SELECT w.id FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id "
+                              "LEFT JOIN pipeline_jobs pj ON pj.pipeline_id=w.pipeline_id AND pj.job_id=w.job_id "
+                              "LEFT JOIN jobs j ON j.id=w.job_id "
                               "WHERE w.state='queued' AND p.mode='agentic' AND p.stop_requested=0 "
                               "AND p.status NOT IN ('stopped','completed','stopping') "
                               "ORDER BY CASE w.role WHEN 'document' THEN 0 WHEN 'submission' THEN 1 WHEN 'evaluator' THEN 2 ELSE 3 END,"
-                              "w.created_at,w.id").fetchall()
+                              "CASE WHEN w.role='submission' AND w.started_at IS NOT NULL THEN 0 ELSE 1 END,"
+                              "CASE WHEN w.role='submission' AND pj.fit_jd_version=j.jd_version "
+                              "AND pj.fit_profile_version=? THEN pj.fit_score END DESC,"
+                              "w.created_at,w.id",(self.profile_version(db),)).fetchall()
             return [row[0] for row in rows]

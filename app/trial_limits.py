@@ -56,6 +56,13 @@ def stop_reason(db, policy):
     if policy.get('max_invocations') is not None and len(runs(db, policy)) >= policy["max_invocations"] and not active:
         return "Supervised trial reached its worker-invocation limit."
     placeholders = ','.join('?' for _ in policy["job_ids"])
+    if set(policy.get('allowed_roles', [])) == {'evaluator'}:
+        remaining = db.execute("SELECT 1 FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
+            "WHERE pj.pipeline_id=? AND pj.job_id IN (" + placeholders + ") AND "
+            "(pj.fit_score IS NULL OR pj.fit_jd_version!=j.jd_version OR pj.fit_profile_version!="
+            "CAST((SELECT value FROM meta WHERE key='profile_version') AS INTEGER)) LIMIT 1",
+            [policy["pipeline_id"], *policy["job_ids"]]).fetchone()
+        return "All jobs selected for the evaluation-only batch have current fit scores." if not remaining and not active else None
     remaining = db.execute("SELECT 1 FROM jobs WHERE id IN (" + placeholders + ") AND phase NOT IN ('submitted','discarded') LIMIT 1", policy["job_ids"]).fetchone()
     # A committed receipt precedes the same turn's safe tab cleanup and usage
     # report. Admission is already closed to other tasks; let that turn exit.

@@ -86,8 +86,10 @@ class _FixtureRuntime:
 
         if role == "evaluator":
             bridge.call("finish_evaluation", {
-                "decision": "approve",
+                "score": 95, "eligibility": "eligible", "confidence": "high",
                 "reason": "The fixed synthetic role fits the synthetic fixture profile.",
+                "requirements": [{"requirement": "Fixture engineering", "importance": "core", "match": "met", "evidence": "Synthetic profile"}],
+                "hard_blockers": [],
                 "observations": {"test_only": True},
             })
             return {"disposition": "completed", "session_id": session_id}

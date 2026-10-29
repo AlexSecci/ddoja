@@ -154,16 +154,28 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
                                 additional=False),
     },
     "finish_evaluation": {
-        "description": "Commit the agent's approve/discard decision for this one job from existing evidence. Allow credible stretch applications; record unverified qualifications as uncertainties rather than asking skill/experience surveys. Never invent claims or treat unknown as No.",
-        "inputSchema": _object({"decision": {"type": "string", "enum": ["approve", "discard"]},
-                                 "reason": _TEXT, "observations": _OBJ}, ("decision", "reason")),
+        "description": "Score this one job's fit from 0 to 100 using the full JD and documented applicant evidence. 100 means all material requirements met or exceeded; near misses and transferable skills count. Only confirmed non-negotiable barriers block a role (score 0). All positive eligible scores enter the ranked backlog, including very low scores; 0 is not submitted. Explain material matches/gaps and uncertainty without skill surveys. This records an assessment; it does not launch a submission worker.",
+        "inputSchema": _object({
+            "score": {"type": "integer", "minimum": 0, "maximum": 100},
+            "eligibility": {"type": "string", "enum": ["eligible", "blocked"]},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "reason": _TEXT,
+            "requirements": {"type": "array", "minItems": 1, "maxItems": 16, "items": _object({
+                "requirement": _TEXT,
+                "importance": {"type": "string", "enum": ["core", "supporting", "preferred", "hard_eligibility"]},
+                "match": {"type": "string", "enum": ["met", "mostly_met", "transferable", "missing", "unknown"]},
+                "evidence": _TEXT}, ("requirement", "importance", "match", "evidence"))},
+            "hard_blockers": {"type": "array", "maxItems": 8, "items": _object({
+                "requirement": _TEXT, "job_evidence": _TEXT, "applicant_evidence": _TEXT},
+                ("requirement", "job_evidence", "applicant_evidence"))},
+            "observations": _OBJ}, ("score", "eligibility", "confidence", "reason", "requirements", "hard_blockers")),
     },
     "checkpoint": {
         "description": "Persist a short checkpoint label (1–256 characters) and resumable context such as the owned tab ID, current URL, page cursor, active category/filters, last processed listing, and remaining paths. Put detailed notes in context rather than in the checkpoint label.",
         "inputSchema": _object({"checkpoint": _CHECKPOINT, "context": _OBJ}, ("checkpoint",)),
     },
     "request_documents": {
-        "description": "Request a dedicated Sol document child for artifacts supported by the current application form. This returns promptly; hand off and wait for that child.",
+        "description": "Request a dedicated document child using the configured materials model for artifacts supported by the current application form. This returns promptly; hand off and wait for that child.",
         "inputSchema": _object({"artifacts": {"type": "array", "items": _ARTIFACT, "minItems": 1, "uniqueItems": True},
                                  "reason": _TEXT, "form_context": _OBJ}, ("artifacts", "reason")),
     },
@@ -281,6 +293,12 @@ class AgentMCPBridge:
             has_scope = "fact_scope" in arguments
             if has_key != has_scope:
                 raise ValueError("Reusable fact questions must include both fact_key and fact_scope, or neither.")
+        if name == "finish_evaluation":
+            tool = next(item for item in self.tools() if item["name"] == name)
+            if "score" in tool["inputSchema"].get("required", []):
+                from app.fit_scoring import assessment
+                if assessment(arguments) is None:
+                    raise ValueError("This evaluator contract requires a 0–100 fit assessment, not a binary decision.")
         arguments=dict(arguments)
         force=arguments.pop('force',False) if name=='retrieve_sources' else False
         value = self._action_handler(self.worker_id, self._capability, name, arguments)

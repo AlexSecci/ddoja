@@ -338,6 +338,7 @@ def test_worker_checkpoint_cannot_forge_pre_send_or_document_package_state(tmp_p
     for forged in ({"final_action_may_have_been_sent": True},
                    {"document_package_id": "outside-model-control"},
                    {"ready_artifacts": [{"path": "invented.pdf"}]},
+                   {"evaluation_scoring_version": 0},
                    {"snapshot_supersession": {"replacement_worker_id": "forged"}}):
         try:
             store.agent_action(worker["id"], launch["capability"], "checkpoint",

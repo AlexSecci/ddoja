@@ -169,7 +169,10 @@ def test_evaluation_cache_invalidates_policy_profile_and_filter_changes(tmp_path
     (tmp_path / "config/workers.json").write_text(json.dumps({"models": {"evaluation": {"model": "gpt-6.1-sol", "effort": "high"}}}))
     evaluator = next(w for w in store.list_agent_workers(pipeline["id"]) if w["role"] == "evaluator")
     e = start(store, evaluator)
-    store.agent_action(evaluator["id"], e["capability"], "finish_evaluation", {"decision": "discard", "reason": "Synthetic decision"})
+    store.agent_action(evaluator["id"], e["capability"], "finish_evaluation", {
+        "score": 0, "eligibility": "blocked", "confidence": "high", "reason": "Synthetic confirmed barrier",
+        "requirements": [{"requirement": "Fixture eligibility", "importance": "hard_eligibility", "match": "missing", "evidence": "Synthetic fixture"}],
+        "hard_blockers": [{"requirement": "Fixture eligibility", "job_evidence": "Explicit fixture requirement", "applicant_evidence": "Confirmed fixture incompatibility"}]})
     store.finish_agent_turn(evaluator["id"], {"disposition": "completed"})
     store.agent_action(d["id"], launch["capability"], "finish_discovery", {"status": "complete", "detail": "Synthetic coverage"})
     store.finish_agent_turn(d["id"], {"disposition": "completed"})

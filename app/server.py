@@ -42,6 +42,11 @@ class WorkerChoice(Strict):
     browser_backend: str = Field(max_length=30)
 
 
+class StageDispatchInput(Strict):
+    stage: Literal["evaluation", "submission"]
+    paused: bool = Field(strict=True)
+
+
 class WorkerSettingsInput(Strict):
     revision: int = Field(ge=0, strict=True)
     roles: dict[str, WorkerChoice]
@@ -743,7 +748,8 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
                    "manual_discard_reason", "manual_discard_provenance", "manual_discard_actor",
                    "manual_discarded_at", "manual_discard", "manual_auth_resume", "agent_decision",
                    "agent_reason", "agent_status", "adoption", "submission_uncertain",
-                   "application_outcome", "job_title", "profile_refresh")
+                   "application_outcome", "job_title", "profile_refresh", "fit_score", "fit_current",
+                   "fit_assessment", "fit_jd_version", "fit_profile_version")
         rows = []
         for job in payload["jobs"]:
             row = {key: job.get(key) for key in allowed}
@@ -762,6 +768,18 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     @app.post("/api/pipelines/{pipeline_id}/visibility")
     def pipeline_visibility(pipeline_id: str, body: PipelineVisibility):
         return {"pipeline": store.set_pipeline_visibility(pipeline_id, body.hidden)}
+
+    @app.post("/api/pipelines/{pipeline_id}/dispatch")
+    def stage_dispatch(pipeline_id: str, value: StageDispatchInput):
+        store.set_stage_dispatch(pipeline_id, value.stage, value.paused)
+        app.state.agent_pipeline_manager.schedule()
+        return app.state.agent_pipeline_manager.pipeline_view(pipeline_id)
+
+    @app.post("/api/pipelines/{pipeline_id}/rescore-legacy")
+    def rescore_legacy(pipeline_id: str):
+        queued = store.queue_legacy_rescoring(pipeline_id)
+        app.state.agent_pipeline_manager.schedule()
+        return {**app.state.agent_pipeline_manager.pipeline_view(pipeline_id),"rescoring":queued}
 
     @app.post("/api/pipelines/{pipeline_id}/resume")
     def resume_pipeline(pipeline_id: str):

@@ -35,24 +35,18 @@ def test_compact_index_preserves_depth_and_exact_retrieval_in_controls_call(tmp_
             store._agent_retrieve_sources(db, raw, {"source_ids": refs})
 
 
-def test_backpressure_buffers_and_wakes_same_worker_without_model_polling(tmp_path):
+def test_submission_backlog_does_not_throttle_offline_evaluations(tmp_path):
     store, pipeline, _, _, _ = seed(tmp_path, 8)
     workers = [w for w in store.list_agent_workers(pipeline["id"]) if w["role"] == "evaluator"]
     for w in workers[:6]:
         launch = start(store, w)
         store.agent_action(w["id"], launch["capability"], "finish_evaluation", {"decision": "approve", "reason": "Fixture fit"})
         store.finish_agent_turn(w["id"], {"disposition": "completed"})
-    assert not store.reserve_agent_worker(workers[6]["id"])
-    assert store.get_agent_worker(workers[6]["id"])["state"] == "queued"
-    assert any(w["worker_id"] == workers[6]["id"] for w in store.agent_runtime_status(pipeline["id"])["capacity_waits"])
-    parent = next(w for w in store.list_agent_workers(pipeline["id"]) if w["role"] == "submission")
-    assert store.reserve_agent_worker(parent["id"])
-    with store.connect(write=True) as db:
-        db.execute("UPDATE agent_workers SET state='discarded',turn_active=0 WHERE id=?", (parent["id"],))
     assert store.reserve_agent_worker(workers[6]["id"])
+    assert not any(w["worker_id"] == workers[6]["id"] for w in store.agent_runtime_status(pipeline["id"])["capacity_waits"])
 
 
-def test_circuit_limits_buffer_and_reports_orphan_without_claiming_recovery(tmp_path):
+def test_circuit_reports_orphan_but_allows_offline_evaluation(tmp_path):
     store, pipeline, d, launch, _ = seed(tmp_path, 5)
     evaluators = [w for w in store.list_agent_workers(pipeline["id"]) if w["role"] == "evaluator"]
     for w in evaluators[:3]:
@@ -62,12 +56,12 @@ def test_circuit_limits_buffer_and_reports_orphan_without_claiming_recovery(tmp_
     cua(store, d, success=False)
     store.agent_action(d["id"], launch["capability"], "browser_control", {"operation": "open_circuit", "reason": "Connector failed"})
     store.finish_agent_turn(d["id"], {"disposition": "failed", "error": "Connector failed"})
-    assert not store.reserve_agent_worker(evaluators[3]["id"])
     with store.connect(write=True) as db:
         store._agent_refresh_pipeline(db, pipeline["id"])
     report = store.get_pipeline(pipeline["id"])
     assert report["stage"] == "browser_gate" and report["blockers"]
     assert store.agent_runtime_status(pipeline["id"])["circuits"][0]["open"]
+    assert store.reserve_agent_worker(evaluators[3]["id"])
 
 
 def test_recovery_owner_can_drain_full_buffer_after_approval(tmp_path):
@@ -83,7 +77,7 @@ def test_recovery_owner_can_drain_full_buffer_after_approval(tmp_path):
     assert not store.reserve_agent_worker(d["id"])  # Still respects pending approval.
     store.decide_agent_inbox(gate["inbox_item_id"], "approve", "Synthetic recovery approved")
     assert store.reserve_agent_worker(d["id"])
-    assert not store.reserve_agent_worker(workers[6]["id"])  # No upstream flood.
+    assert store.reserve_agent_worker(workers[6]["id"])  # Offline evaluation is independent.
 
 
 def test_isolate_tab_timeout_preserves_job_approval_and_requires_independent_evidence(tmp_path):

@@ -478,6 +478,7 @@ class AgentPipelineManager:
             try:
                 while True:
                     self._schedule_requested = False
+                    self.store.prepare_ranked_submissions()
                     queued = self.store.list_queued_agent_workers()
                     for worker_id in queued:
                         current = self._futures.get(worker_id)

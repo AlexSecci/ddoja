@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS pipelines(
  mode TEXT NOT NULL DEFAULT 'legacy', adopted_from_pipeline_id TEXT,
  agent_test_only INTEGER NOT NULL DEFAULT 0,
  dashboard_hidden INTEGER NOT NULL DEFAULT 0,
+ evaluation_paused INTEGER NOT NULL DEFAULT 0, submission_paused INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS pipelines_company_created ON pipelines(company_id,created_at);
@@ -110,7 +111,10 @@ CREATE TABLE IF NOT EXISTS pipeline_jobs(
  excluded_reason TEXT NOT NULL DEFAULT '', manual_discard_reason TEXT NOT NULL DEFAULT '',
  manual_discard_provenance TEXT NOT NULL DEFAULT '', manual_discard_actor TEXT NOT NULL DEFAULT '',
  manual_discarded_at TEXT, agent_decision TEXT NOT NULL DEFAULT '', agent_reason TEXT NOT NULL DEFAULT '',
- agent_status TEXT NOT NULL DEFAULT '', PRIMARY KEY(pipeline_id,job_id)
+ agent_status TEXT NOT NULL DEFAULT '',
+ fit_score INTEGER CHECK(fit_score BETWEEN 0 AND 100), fit_payload TEXT NOT NULL DEFAULT '{}',
+ fit_jd_version INTEGER, fit_profile_version INTEGER,
+ PRIMARY KEY(pipeline_id,job_id)
 );
 CREATE INDEX IF NOT EXISTS pipeline_jobs_job ON pipeline_jobs(job_id);
 

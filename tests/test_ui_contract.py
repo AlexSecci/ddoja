@@ -575,5 +575,5 @@ def test_agentic_markup_covers_filters_workers_inbox_quota_and_nonfalse_completi
 def test_job_record_rationale_is_labeled_as_an_evaluation_time_snapshot():
     root = Path(__file__).resolve().parents[1]
     js = (root / "app" / "static" / "app.js").read_text(encoding="utf-8")
-    assert "Evaluation-time decision" in js
+    assert "Fit assessment" in js
     assert "Evaluation-time rationale only; this is not a current submission authorization." in js

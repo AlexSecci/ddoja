@@ -679,7 +679,9 @@ function renderPipeline(view) {
     ['Discovered', c.discovered],
     ['Selected for evaluation', c.selected],
     ['Evaluated', c.evaluated],
-    ['Agent-approved', c.accepted ?? c.approved],
+    ['Eligible for application', c.accepted ?? c.approved],
+    ['Scored', c.scored ?? 0],
+    ['Scored applications remaining', c.scored_backlog ?? 0],
     ['Discarded', c.discarded],
     ['Submitted with evidence', c.submitted],
     ['Excluded by filters', c.excluded],
@@ -793,6 +795,29 @@ function renderPipeline(view) {
     const resume = button('Resume this company', 'quiet-button', () => pipelineAction(p.id, 'resume'));
     resume.disabled = !pipelineCurrent || Boolean(quota.paused); controls.append(resume);
   }
+  if (p.mode === 'agentic' && p.status !== 'completed') {
+    ['evaluation', 'submission'].forEach(stage => {
+      const paused = Boolean(p[stage + '_paused']);
+      const control = button((paused ? 'Enable new ' : 'Pause new ') + (stage === 'evaluation' ? 'evaluations' : 'submissions'), 'quiet-button', async () => {
+        try {
+          await api('pipelines/' + segment(p.id) + '/dispatch', {method: 'POST', body: JSON.stringify({stage, paused: !paused})});
+          setStatus('New ' + stage + ' tasks ' + (paused ? 'enabled.' : 'paused. Already-started applications finish normally.'));
+          await refreshDashboard();
+        } catch (error) { setStatus(error.message, true); }
+      });
+      control.disabled = !pipelineCurrent;
+      controls.append(control);
+    });
+  }
+  if (p.mode === 'agentic' && p.status !== 'completed') {
+    controls.append(button('Re-score older assessments', 'quiet-button', async () => {
+      try {
+        const result = await api('pipelines/' + segment(p.id) + '/rescore-legacy', {method: 'POST', body: '{}'});
+        setStatus('Queued ' + result.rescoring.count + ' safe legacy assessments for scoring. Submitted, uncertain and terminal applications are excluded. Stopped campaigns stay stopped.');
+        await refreshDashboard();
+      } catch (error) { setStatus(error.message); }
+    }));
+  }
   controls.append(button(expandedPipelines.has(p.id) ? 'Hide job records' : 'View job records',
     'outline-button', () => togglePipelineJobs(p.id)));
   if (p.dashboard_hidden || ['completed', 'stopped'].includes(p.status)) {
@@ -806,7 +831,8 @@ function renderPipeline(view) {
 }
 function renderPipelineJobs(p, view) {
   const section = withRenderKey(element('section', undefined, 'pipeline-jobs'), 'pipeline-jobs:' + p.id);
-  section.append(element('h4', 'Listing and per-job records'));
+  section.append(element('h4', 'Listing and per-job records · highest fit first'));
+  section.append(element('p', 'Fit is scored from 0–100, not a hiring probability. All positive eligible scores are kept; 0 is not submitted. Each free submission slot takes the highest score currently available; started applications finish normally.', 'sub'));
   const saved = pipelineJobs.get(p.id);
   if (!saved) { section.append(element('p', 'Loading saved job records…', 'empty-state')); return section; }
   if (saved.error) section.append(element('p', 'Some saved listing data could not refresh: ' + saved.error, 'worker-error'));
@@ -817,7 +843,7 @@ function renderPipelineJobs(p, view) {
   }
   const wrap = element('div', undefined, 'table-wrap'), table = element('table');
   const head = element('thead'), header = element('tr');
-  ['Role and location', 'Evaluation-time decision', 'Application state', 'Checkpoint or adoption'].forEach(label => header.append(element('th', label)));
+  ['Role and location', 'Fit assessment', 'Application state', 'Checkpoint or adoption'].forEach(label => header.append(element('th', label)));
   head.append(header); table.append(head);
   const body = element('tbody');
   rows.forEach(job => {
@@ -829,7 +855,21 @@ function renderPipelineJobs(p, view) {
     role.append(element('p', [job.location, job.country, job.employment, job.arrangement].filter(Boolean).join(' · '), 'sub'));
     if (job.selected === false) role.append(element('p', 'Excluded by this pipeline’s filters: ' + (job.excluded_reason || 'not selected'), 'sub'));
     const decision = element('td');
-    decision.append(element('span', humanize(job.agent_decision || job.evaluation_status || job.phase || 'pending'), 'badge'));
+    if (job.fit_current && Number.isInteger(job.fit_score)) {
+      const fit = job.fit_assessment || {};
+      decision.append(element('strong', job.fit_score + ' / 100', 'fit-score'));
+      decision.append(element('span', fit.eligibility === 'blocked' ? 'Hard barrier' : job.fit_score === 0 ? 'No fit · not queued' : 'Eligible', 'badge'));
+      decision.append(element('p', 'Evidence confidence: ' + humanize(fit.confidence || 'unknown'), 'sub'));
+      const details = element('details');
+      details.append(element('summary', 'Requirements and evidence'));
+      const list = element('ul');
+      (fit.requirements || []).forEach(item => list.append(element('li', item.requirement + ' · ' + humanize(item.importance) + ' · ' + humanize(item.match) + ': ' + item.evidence)));
+      details.append(list);
+      (fit.hard_blockers || []).forEach(item => details.append(element('p', item.requirement + ': ' + item.job_evidence + ' — ' + item.applicant_evidence, 'worker-error')));
+      decision.append(details);
+    } else {
+      decision.append(element('span', job.fit_jd_version != null ? 'Needs rescoring' : job.agent_decision ? 'Unscored legacy assessment' : 'Awaiting score', 'badge'));
+    }
     if (job.agent_reason || job.reason) {
       decision.append(element('p', 'Evaluation-time rationale only; this is not a current submission authorization. ' + (job.agent_reason || job.reason), 'sub'));
     }
