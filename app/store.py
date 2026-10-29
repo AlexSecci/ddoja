@@ -62,6 +62,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "email_verification_final_scope",
     "instruction_contract_id", "context_handoff_pending", "context_handoffs",
     "unexecuted_click_recovery", "verified_code_rejections",
+    "email_challenge_recoveries",
 }
 
 AGENT_DISCOVERY_PROGRESS_FIELDS = {
@@ -2487,6 +2488,22 @@ class Store:
             context['final_action_may_have_been_sent'] = False
             context.pop('email_verification_final_scope', None)
             context.pop('reconciliation_recovery', None)
+            context['operator_instructions'] = ('Greenhouse definitively rejected the previous code; the native '
+                'negative observation and send history are preserved. Continue the SAME application and exact '
+                'human-approved verification scope. If this retained challenge has no resend control, reopen '
+                'the exact job application URL in the SAME owned tab and restore ordinary fields/uploads from '
+                'the existing ready documents and saved truthful answers. Do not regenerate documents. '
+                'Observe the restored form, call begin_final_action before its initial Submit, then checkpoint '
+                'awaiting_email_token_handoff immediately when a fresh code is sent. The current approval '
+                'covers a fresh matching code for this same rejected step, not a different application. '
+                'Keep all other human approvals and final-action checks intact.')
+            gate = db.execute("SELECT * FROM agent_browser_controls WHERE control_type='company_auth' "
+                              "AND state='open' AND worker_id=?", (worker_id,)).fetchone()
+            if gate:
+                self._agent_set_browser_control(db, gate['scope_key'], 'company_auth', 'closed',
+                    'The site explicitly rejected this code; retiring that failed token flow.',
+                    'Verified negative browser evidence; no authentication success or approval is claimed.',
+                    worker_id, [event_id])
             now = timestamp()
             db.execute("UPDATE agent_workers SET state='stopped',checkpoint='security_code_rejection_reconciled',"
                        "context=?,error='',completed_at=NULL,capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",
@@ -2527,6 +2544,56 @@ class Store:
             changed=db.execute("UPDATE agent_workers SET state='queued',error='' WHERE id=? AND state='stopped' AND checkpoint='security_code_rejection_reconciled' AND EXISTS(SELECT 1 FROM pipelines p WHERE p.id=agent_workers.pipeline_id AND p.stop_requested=0 AND p.status NOT IN ('stopped','stopping','completed'))",(worker_id,)).rowcount
             if changed:self.event(db,'agent.security_code_recovery_queued',{'worker_id':worker_id,'source_event_id':evidence['event_id']},worker['job_id'],'scheduler')
         return bool(changed)
+
+    def recover_pending_email_verification(self, worker_id, provenance):
+        """Continue a proved incomplete challenge without resetting any send flag."""
+        from .trial_limits import read as read_trial, expired
+        if not isinstance(provenance, str) or not provenance.strip():
+            raise ValueError('Recovery needs its operator provenance.')
+        with self.connect(write=True) as db:
+            w = db.execute('SELECT w.*,p.stop_requested,p.status AS pipeline_status FROM agent_workers w '
+                           'JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?', (worker_id,)).fetchone()
+            if (not w or w['role'] != 'submission' or w['state'] != 'interrupted' or w['turn_active'] or not w['session_id']
+                    or w['stop_requested'] or w['pipeline_status'] in {'stopped', 'stopping', 'completed'}):
+                raise Conflict('Only an inactive interrupted verification in a running campaign can recover.')
+            quota = db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()
+            trial = read_trial(db, w['pipeline_id'])
+            if (quota and self._agent_decode(quota[0], {}).get('paused') or trial and
+                    (trial['state'] != 'active' or expired(trial) or w['job_id'] not in trial['job_ids'])):
+                raise Conflict('The current quota or batch admission prevents recovery.')
+            job = db.execute('SELECT * FROM jobs WHERE id=?', (w['job_id'],)).fetchone()
+            if (not job or job['jd_version'] != w['jd_version'] or self.profile_version(db) != w['profile_version']
+                    or job['phase'] == 'submitted' or db.execute(
+                    "SELECT 1 FROM agent_submission_results WHERE job_id=? AND state='submitted'", (w['job_id'],)).fetchone()
+                    or self._agent_pending_inbox_wait(db, worker_id)):
+                raise Conflict('The snapshot, receipt or pending human action prevents this recovery.')
+            evidence = self._agent_latest_cua_event(db, w, success=True)
+            proof = (evidence or {}).get('verification') or {}
+            context = self._agent_decode(w['context'], {})
+            observed_at = db.execute('SELECT created_at FROM agent_runtime_events WHERE id=?',
+                                     (evidence['event_id'],)).fetchone() if evidence else None
+            if (not evidence or evidence.get('application_url') != job['url'] or not proof.get('present')
+                    or proof.get('filled_boxes') != 0 or proof.get('submit_enabled') is not False
+                    or (urlsplit(job['url']).hostname or '') != 'job-boards.greenhouse.io'
+                    or not observed_at or not 0 <= time.time()-datetime.fromisoformat(observed_at[0]).timestamp() <= 120
+                    or context.get('email_verification_final_scope')):
+                raise Conflict('Recovery requires the exact still-incomplete email challenge; ambiguous sends stay uncertain.')
+            history = context.setdefault('email_challenge_recoveries', [])
+            if evidence['event_id'] in history:
+                raise Conflict('This observation already received one recovery turn.')
+            history.append(evidence['event_id'])
+            context['operator_instructions'] = ('Continue this existing email-code challenge on the retained page. '
+                'Reobserve the exact job and checkpoint awaiting_email_token_handoff. The broker now matches the '
+                'recorded Submit/challenge window, even if the checkpoint was delayed. Do not reload, replay Submit, '
+                'or create a new application. Preserve all exact human approval requirements. If recovery fails, '
+                'ask one operational question and wait at that durable checkpoint.')
+            db.execute("UPDATE agent_workers SET state='queued',context=?,error='',completed_at=NULL,"
+                       "resume_mode='same_session',capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",
+                       (json.dumps(context), timestamp(), worker_id))
+            self.event(db, 'agent.pending_email_challenge_recovered', {'worker_id': worker_id,
+                'source_event_id': evidence['event_id'], 'provenance': provenance.strip(),
+                'send_history_preserved': True, 'approval_granted': False}, w['job_id'], 'supervisor')
+        return self.get_agent_worker(worker_id)
 
     def release_completed_auth_controls(self):
         """Retire orphan auth locks only after an inactive committed submission."""
@@ -6695,6 +6762,13 @@ class Store:
             raise Conflict('Job or applicant snapshot changed before the final application action.')
         if snapshot['phase'] == 'submitted' or db.execute("SELECT 1 FROM agent_submission_results WHERE job_id=? AND state='submitted'",(worker['job_id'],)).fetchone():
             raise Conflict('This application already has a committed submission receipt.')
+        auth_gate=db.execute("SELECT state,worker_id FROM agent_browser_controls WHERE scope_key=? "
+                             "AND control_type='company_auth'",('company:'+str(worker['company_id']),)).fetchone()
+        if auth_gate and auth_gate['state']=='open' and auth_gate['worker_id']!=worker['id']:
+            waiting=self._agent_browser_control_action(db,worker,{'operation':'acquire_auth',
+                'reason':'Another worker owns company authentication before this final action.'})
+            return {'authorized':False,**waiting,
+                    'instruction':'Wait for the authentication owner. This is a durable browser wait; end the turn without clicking Submit.'}
         from .ephemeral_auth import permitted_final
         email_verification=permitted_final(self,db,worker)
         current_context = self._agent_decode(worker['context'], {})

@@ -53,6 +53,36 @@ def test_code_is_one_use_encrypted_bound_to_approval_and_current_nonce(tmp_path,
         assert not ephemeral_auth.permitted_final(s,db,w)
 
 
+@pytest.mark.parametrize('blocked', [None, 'uncertain', 'running', 'stopped_pipeline', 'stale_profile', 'missing_challenge'])
+def test_interrupted_empty_challenge_recovery_preserves_send_and_approval_scope(tmp_path, monkeypatch, blocked):
+    s, p, j, wid = fixture(tmp_path, monkeypatch)
+    text = ('### Page\n- Page URL: '+j['url']+'\n### Snapshot\n'
+            '- group "enter the 8-character code to confirm":\n'
+            + '\n'.join('- textbox [ref=code%d]' % n for n in range(8))
+            + '\n- button "Submit application" [disabled] [ref=submit]')
+    if blocked != 'missing_challenge':
+        s.agent_runtime_event(wid, {'type': 'tool_result', 'tool_name': 'playwright.browser_snapshot',
+            'success': True, 'session_id': 'fixture-session', 'transport_event': {'type': 'item.completed', 'item': {
+                'type': 'mcp_tool_call', 'server': 'playwright', 'tool': 'browser_snapshot', 'status': 'completed',
+                'result': {'content': [{'type': 'text', 'text': text}]}}}})
+    with s.connect(write=True) as db:
+        db.execute("UPDATE pipelines SET status='running' WHERE id=?", (p['id'],))
+        db.execute('UPDATE agent_workers SET state=?,turn_active=0,context=? WHERE id=?',
+                   (blocked if blocked in {'uncertain', 'running'} else 'interrupted',
+                    json.dumps({'final_action_may_have_been_sent': True}), wid))
+        if blocked == 'stopped_pipeline': db.execute('UPDATE pipelines SET stop_requested=1 WHERE id=?', (p['id'],))
+        if blocked == 'stale_profile': db.execute('UPDATE agent_workers SET profile_version=profile_version+1 WHERE id=?', (wid,))
+    if blocked:
+        with pytest.raises(Conflict): s.recover_pending_email_verification(wid, 'Verified operator recovery')
+    else:
+        result = s.recover_pending_email_verification(wid, 'Verified operator recovery')
+        assert result['state'] == 'queued' and result['session_id'] == 'fixture-session'
+        assert result['context']['final_action_may_have_been_sent'] is True
+        assert not result['context'].get('email_verification_final_scope')
+        with s.connect() as db:
+            assert db.execute("SELECT COUNT(*) FROM agent_inbox WHERE worker_id=? AND state='approved'", (wid,)).fetchone()[0] == 1
+
+
 @pytest.mark.parametrize('invalid_code', [False, True])
 def test_recovery_requires_explicit_current_code_rejection_and_preserves_history(tmp_path, monkeypatch, invalid_code):
     s, p, j, wid = fixture(tmp_path, monkeypatch)

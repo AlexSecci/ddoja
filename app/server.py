@@ -121,6 +121,10 @@ class AgentReplacement(Strict):
     replacement_reason: str = Field(min_length=1, max_length=1000)
 
 
+class EmailVerificationRecovery(Strict):
+    provenance: str = Field(min_length=1, max_length=1000)
+
+
 class ApplicationOutcomeInput(Strict):
     status: Literal["pending", "rejected", "accepted", "unknown"]
     provenance: str = Field(min_length=1, max_length=500)
@@ -804,6 +808,15 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
             raise Conflict("Session replacement applies only to an agentic worker.")
         return app.state.agent_pipeline_manager.resume_replacement(
             pipeline_id, worker_id, body.provenance, body.replacement_reason)
+
+    @app.post('/api/pipelines/{pipeline_id}/workers/{worker_id}/recover-email-verification')
+    def recover_email_verification(pipeline_id: str, worker_id: str, body: EmailVerificationRecovery):
+        worker = store.get_agent_worker(worker_id)
+        if worker['pipeline_id'] != pipeline_id:
+            raise Conflict('The worker belongs to another campaign.')
+        recovered = store.recover_pending_email_verification(worker_id, body.provenance)
+        app.state.agent_pipeline_manager.schedule()
+        return {'worker_id': recovered['id'], 'state': recovered['state'], 'approval_granted': False}
 
     @app.post("/api/pipelines/{pipeline_id}/jobs/{job_id}/manual-auth-complete")
     def manual_auth_complete(pipeline_id: str, job_id: str, body: ManualAuthComplete):

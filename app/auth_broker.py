@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import threading
 import time
+from datetime import datetime
 from urllib.parse import urlsplit
 import httpx
 from email.utils import getaddresses, parseaddr
@@ -31,6 +32,42 @@ def extract_code(payload):
     if match:return match.group(1)
     candidates={v for v in re.findall(r'\b[A-Za-z0-9]{8}\b',text) if any(c.isdigit() for c in v) and any(c.isalpha() for c in v)}
     return next(iter(candidates)) if len(candidates)==1 else None
+
+
+def verification_mail_window(store, worker, job):
+    """Use the observed send/challenge transition, not a delayed model checkpoint.
+
+    Only a narrow, recent, exact-page transition is usable. A resend or another
+    Submit invalidates the older window. Ambiguity still fails closed below.
+    """
+    click = None
+    window = None
+    with store.connect() as db:
+        rows = db.execute("SELECT tool_name,payload,created_at FROM agent_runtime_events "
+            "WHERE worker_id=? AND success=1 AND tool_name IN "
+            "('playwright.browser_click','playwright.browser_snapshot') ORDER BY rowid",
+            (worker['id'],)).fetchall()
+        for row in rows:
+            value = json.loads(row['payload'])
+            item = value.get('transport_event', {}).get('item', {})
+            args = item.get('arguments') or {}
+            when = datetime.fromisoformat(row['created_at']).timestamp()
+            url = value.get('observed_application_url') or store._agent_observed_application_url(db, worker, value)
+            if row['tool_name'] == 'playwright.browser_click':
+                label = str(args.get('element') or '').casefold()
+                if 'resend' in label or 'send a new code' in label:
+                    click = window = None
+                elif 'submit' in label:
+                    window = None
+                    click = when if url == job['url'] else None
+            proof = value.get('verification_observation') or {}
+            if (click is not None and window is None and url == job['url']
+                    and proof.get('present') and proof.get('filled_boxes') == 0
+                    and proof.get('submit_enabled') is False and 0 <= when-click <= 20):
+                window = (int(click)-2, int(when)+3)
+    if window and 0 <= time.time()-window[1] <= 900:
+        return window
+    return None
 
 
 class AuthBroker:
@@ -64,7 +101,10 @@ class AuthBroker:
             with httpx.Client(timeout=15,trust_env=False) as client:
                 response=client.post('https://oauth2.googleapis.com/token',data={**{k:credentials[k] for k in ('client_id','client_secret','refresh_token')},'grant_type':'refresh_token'})
                 response.raise_for_status();headers={'Authorization':'Bearer '+response.json()['access_token']}
-                query='from:no-reply@us.greenhouse-mail.io subject:"Security code for your application" after:'+str(int(request['requested_at_unix'])-30)
+                window=verification_mail_window(self.store,worker,job)
+                after,before=window or (int(request['requested_at_unix'])-30,None)
+                query='from:no-reply@us.greenhouse-mail.io subject:"Security code for your application" after:'+str(after)
+                if before is not None:query+=' before:'+str(before)
                 config=self.store.root/'config/submission-efficiency.json'
                 seconds=json.loads(config.read_text()).get('broker_lookup_seconds',20) if config.exists() else 20
                 deadline=time.monotonic()+min(60,max(1,seconds))
@@ -86,8 +126,14 @@ class AuthBroker:
                         recipients={address.lower() for _,address in getaddresses([fields.get('to','')])}
                         if (credentials['email'].lower() not in recipients
                                 or parseaddr(fields.get('from',''))[1].lower()!='no-reply@us.greenhouse-mail.io'
-                                or int(mail['internalDate'])/1000<request['requested_at_unix']-30):
+                                or int(mail['internalDate'])/1000<after
+                                or before is not None and int(mail['internalDate'])/1000>=before):
                             raise ValueError('Scoped message identity did not match.')
+                        with self.store.connect() as db:
+                            claimed=db.execute("SELECT 1 FROM events WHERE kind='agent.email_token_delivered' "
+                                "AND json_extract(payload,'$.message_id')=? "
+                                "AND json_extract(payload,'$.worker_id')!=?",(candidates[0]['id'],worker_id)).fetchone()
+                        if claimed:raise ValueError('This email was already bound to a different task.')
                         code=extract_code(mail['payload'])
                         if code:
                             from .auth_handoffs import deliver

@@ -413,3 +413,19 @@ def test_closed_auth_gate_does_not_wake_worker_with_pending_human_action(tmp_pat
         db.execute("UPDATE agent_browser_controls SET state='closed' WHERE control_type='company_auth'")
         store._agent_wake_orphaned_auth_waiters(db)
     assert store.get_agent_worker(b['id'])['state']=='waiting_approval'
+
+
+def test_final_action_records_durable_wait_when_another_worker_owns_auth(tmp_path):
+    from test_efficiency_controls import cua
+    store,pipeline,_,_,_=seed(tmp_path,2)
+    for worker in evaluators(store,pipeline):
+        evaluate(store,worker,{'decision':'approve','reason':'Fixture'})
+    owner,waiter=submissions(store,pipeline)
+    a=start(store,owner);b=start(store,waiter);cua(store,owner)
+    store.agent_action(owner['id'],a['capability'],'browser_control',{'operation':'acquire_auth'})
+    result=store.agent_action(waiter['id'],b['capability'],'begin_final_action',{})
+    assert not result['authorized'] and result['state']=='waiting_browser'
+    assert store.get_agent_worker(waiter['id'])['state']=='waiting_browser'
+    assert not store.get_agent_worker(waiter['id'])['context'].get('final_action_may_have_been_sent')
+    store.finish_agent_turn(waiter['id'],{'disposition':'waiting'})
+    assert store.get_agent_worker(waiter['id'])['state']=='waiting_browser'

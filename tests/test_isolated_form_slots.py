@@ -1,7 +1,6 @@
 import json
 import pytest
 
-from app.store import Conflict
 from test_efficiency_controls import seed,start
 
 
@@ -43,5 +42,9 @@ def test_isolated_preparation_does_not_steal_or_bypass_email_owner(tmp_path):
         gate=db.execute("SELECT worker_id FROM agent_browser_controls WHERE control_type='company_auth'").fetchone()
         assert gate[0]==workers[0]['id']
         w=db.execute('SELECT w.*,p.company_id,p.stop_requested FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?',(workers[1]['id'],)).fetchone()
-        with pytest.raises(Conflict,match='Authentication or connector recovery'):
-            s._agent_begin_final_action(db,w,{})
+        result=s._agent_begin_final_action(db,w,{})
+        assert result['authorized'] is False and result['state']=='waiting_browser'
+        assert db.execute("SELECT worker_id FROM agent_browser_controls WHERE control_type='company_auth'").fetchone()[0]==workers[0]['id']
+        waiting=db.execute('SELECT state,context FROM agent_workers WHERE id=?',(workers[1]['id'],)).fetchone()
+        assert waiting['state']=='waiting_browser'
+        assert not json.loads(waiting['context']).get('final_action_may_have_been_sent')
