@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from pathlib import Path
 
 from app.store import Store
@@ -110,3 +111,58 @@ def test_agent_renderer_rejects_package_path_escape(tmp_path):
         assert "outside the agent artifact workspace" in str(error)
     else:
         raise AssertionError("Renderer accepted a package path outside agent artifacts.")
+
+
+def _add_prior_ready_resume(store, pipeline, parent):
+    """An older application attempt has an independently versioned package."""
+    with store.connect(write=True) as db:
+        prior_parent = store._agent_insert_worker(
+            db, pipeline["id"], "submission", job_id=parent["job_id"],
+            context={"document_package_id": "prior-package"})
+        prior_child = store._agent_insert_worker(
+            db, pipeline["id"], "document", job_id=parent["job_id"], parent_id=prior_parent)
+        db.execute(
+            "INSERT INTO agent_artifacts(id,pipeline_id,worker_id,job_id,kind,version,path,sha256,"
+            "filename,media_type,source_notes,jd_version,profile_version,status,created_at) "
+            "VALUES(?,?,?,?, 'resume',99,?,?,'resume.md','text/markdown','{}',1,?,'ready',?)",
+            ("prior-resume", pipeline["id"], prior_child, parent["job_id"],
+             "artifacts/agent/prior-package/v99/resume.md", "prior-digest",
+             store.profile_version(db), "2026-01-01T00:00:00+00:00"))
+
+
+def test_current_child_documents_take_precedence_over_prior_attempt_package(tmp_path):
+    store = Store(tmp_path)
+    pipeline, parent, child, launch = _make_document_child(store)
+    _add_prior_ready_resume(store, pipeline, parent)
+    markdown = "# Test Candidate\n\nCurrent attempt resume.\n"
+    published, _ = AgentMCPBridge(
+        child["id"], launch["capability"], "document", store.agent_action,
+        document_renderer=lambda value: render_and_register_documents(
+            store, child["id"], launch["capability"], value),
+    ).invoke("publish_documents", {
+        "artifacts": [{"kind": "resume", "markdown": markdown, "source_notes": {"fixture": True}}],
+    })
+
+    assert store.finish_agent_turn(child["id"], {"disposition": "completed"})["state"] == "completed"
+    assert store.get_agent_artifact(published["artifacts"][0]["id"])["status"] == "ready"
+    assert store.get_agent_worker(parent["id"])["state"] == "queued"
+    assert store.reserve_agent_worker(parent["id"])
+    parent_launch = store.agent_launch_context(parent["id"])
+    prepared = store.agent_action(parent["id"], parent_launch["capability"], "get_context", {
+        "sections": ["prepared_documents"]})["sections"]["prepared_documents"]
+    assert len(prepared) == 1
+    assert prepared[0]["markdown"] == markdown
+    assert prepared[0]["package_id"] == published["package_id"]
+    manifest = json.loads((tmp_path / published["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["artifacts"][0]["id"] == published["artifacts"][0]["id"]
+
+
+def test_prior_ready_resume_cannot_complete_an_empty_document_child(tmp_path):
+    store = Store(tmp_path)
+    pipeline, parent, child, _ = _make_document_child(store)
+    _add_prior_ready_resume(store, pipeline, parent)
+
+    assert store.finish_agent_turn(child["id"], {"disposition": "completed"})["state"] == "failed"
+    assert store.get_agent_worker(parent["id"])["state"] == "waiting_child"
+    with store.connect() as db:
+        assert db.execute("SELECT status FROM agent_artifacts WHERE id='prior-resume'").fetchone()[0] == "ready"

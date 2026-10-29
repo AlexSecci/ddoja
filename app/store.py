@@ -4967,11 +4967,11 @@ class Store:
         package_id = context.get("document_package_id")
         current_job = db.execute("SELECT jd_version FROM jobs WHERE id=?", (worker["job_id"],)).fetchone()
         profile_version = self.profile_version(db)
-        latest = self._agent_ready_artifacts(db, worker["pipeline_id"], worker["job_id"],
-                                             current_job["jd_version"], profile_version)
-        # Drafts from this child are not ready until the child turn completes.
+        # Versions belong to a child, not a job. A ready resume from an older
+        # attempt must neither mask this child's drafts nor satisfy its request.
+        latest = {}
         draft_rows = db.execute("SELECT * FROM agent_artifacts WHERE worker_id=? AND jd_version=? "
-                                "AND profile_version=? AND status='draft' ORDER BY kind,version DESC",
+                                "AND profile_version=? AND status IN ('draft','ready') ORDER BY kind,version DESC",
                                 (worker_id, current_job["jd_version"], profile_version)).fetchall()
         for row in draft_rows:
             if row["kind"] not in latest:
