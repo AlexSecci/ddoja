@@ -786,6 +786,8 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
 
     @app.post("/api/pipelines/{pipeline_id}/dispatch")
     def stage_dispatch(pipeline_id: str, value: StageDispatchInput):
+        if not value.paused:
+            return app.state.agent_pipeline_manager.start_stage(pipeline_id,value.stage)
         store.set_stage_dispatch(pipeline_id, value.stage, value.paused)
         app.state.agent_pipeline_manager.schedule()
         return app.state.agent_pipeline_manager.pipeline_view(pipeline_id)
@@ -800,7 +802,7 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     def resume_pipeline(pipeline_id: str):
         pipeline = store.get_pipeline(pipeline_id)
         if pipeline.get("mode") == "agentic":
-            return app.state.agent_pipeline_manager.resume(pipeline_id)
+            return app.state.agent_pipeline_manager.start_campaign(pipeline_id)
         return pipeline_response(app.state.pipeline_manager.resume(pipeline_id))
 
     @app.post("/api/pipelines/{pipeline_id}/workers/{worker_id}/resume-replacement")

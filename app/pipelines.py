@@ -437,6 +437,16 @@ class AgentPipelineManager:
         self.schedule()
         return self.pipeline_view(pipeline_id)
 
+    def start_campaign(self, pipeline_id):
+        self.store.resume_agent_pipeline(pipeline_id,manual_start=True)
+        self.schedule()
+        return self.pipeline_view(pipeline_id)
+
+    def start_stage(self, pipeline_id, stage):
+        self.store.resume_agent_pipeline(pipeline_id,manual_start=True,stage=stage)
+        self.schedule()
+        return self.pipeline_view(pipeline_id)
+
     def refresh_job_profile(self, pipeline_id, job_id, provenance):
         refresh = self.store.refresh_agent_job_profile(pipeline_id, job_id, provenance)
         # Idempotent requests still call the scheduler: a prior request may

@@ -4284,6 +4284,8 @@ class Store:
             quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
             if quota.get("paused"):
                 status, stage, blockers = "quota_paused", "quota_paused", [quota.get("reason") or "Account quota pause."]
+            elif all(pipeline[name+'_paused'] for name in ('discovery','evaluation','submission')):
+                status,stage,blockers='awaiting_user','stages_paused',['All stages are paused. Start a stage to continue.']
             elif active:
                 status, stage, blockers = "running", "processing", []
                 running_now = any(row["turn_active"] or row["state"] == "running" for row in current_workers)
@@ -4398,26 +4400,58 @@ class Store:
                    "application_refresh_required": bool(context.get("browser_freshness", {}).get("pending"))}, worker["job_id"], "agent_scheduler")
         return True
 
-    def resume_agent_pipeline(self, pipeline_id):
+    def resume_agent_pipeline(self, pipeline_id, *, manual_start=False, stage=None):
+        if stage is not None and (not manual_start or stage not in {'discovery','evaluation','submission'}):
+            raise ValueError('A stage start requires an explicit dashboard start and a supported stage.')
         with self.connect(write=True) as db:
             row = db.execute("SELECT * FROM pipelines WHERE id=? AND mode='agentic'", (pipeline_id,)).fetchone()
             if not row:
                 raise KeyError(pipeline_id)
             if row["status"] == "completed":
                 raise Conflict("A completed pipeline cannot be resumed.")
-            from .trial_limits import read as read_trial, expired
-            trial = read_trial(db, pipeline_id)
-            if trial and (trial["state"] != "active" or expired(trial)):
-                raise Conflict("The bounded trial ended. Prepare fresh limits before resuming this campaign.")
+            if manual_start and row['status']=='stopping' and db.execute(
+                    'SELECT 1 FROM agent_workers WHERE pipeline_id=? AND turn_active=1',(pipeline_id,)).fetchone():
+                raise Conflict('Wait for the campaign to finish stopping before starting it again.')
             quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
             if quota.get("paused"):
                 raise Conflict("Clear the account quota latch with the explicit quota-resume action first.")
+            from .trial_limits import PREFIX, read as read_trial, expired
+            trial = read_trial(db, pipeline_id)
+            if trial and (trial["state"] != "active" or expired(trial)):
+                if not manual_start:
+                    raise Conflict("The bounded trial ended. Prepare fresh limits before resuming this campaign.")
+                history_key='agent_trial_history:'+pipeline_id+':'+uuid.uuid4().hex
+                db.execute('INSERT INTO meta(key,value) VALUES(?,?)',(history_key,json.dumps(trial)))
+                db.execute('DELETE FROM meta WHERE key=?',(PREFIX+pipeline_id,))
+                self.event(db,'agent.trial_retired_for_manual_start',{'pipeline_id':pipeline_id,
+                    'stage':stage,'history_key':history_key,'previous_trial':trial},actor='user')
+                trial=None
+            if trial and stage:
+                role={'discovery':'discovery','evaluation':'evaluator','submission':'submission'}[stage]
+                if ((trial.get('allowed_roles') and role not in trial['allowed_roles'])
+                        or role=='discovery' and trial.get('max_discovery_invocations')==0):
+                    raise Conflict('The active bounded run does not allow this stage. Its limits remain in effect until it ends.')
+            if stage:
+                if row['stop_requested'] or row['status']=='stopped':
+                    db.execute('UPDATE pipelines SET discovery_paused=1,evaluation_paused=1,submission_paused=1 WHERE id=?',(pipeline_id,))
+                db.execute(f'UPDATE pipelines SET {stage}_paused=0 WHERE id=?',(pipeline_id,))
+            current=db.execute('SELECT * FROM pipelines WHERE id=?',(pipeline_id,)).fetchone()
+            roles=None
+            if manual_start:
+                roles=({'discovery':'discovery','evaluation':'evaluator','submission':'submission'}[stage],) if stage else tuple(
+                    role for name,role in [('discovery','discovery'),('evaluation','evaluator'),('submission','submission')]
+                    if not current[name+'_paused'])
+                if 'submission' in roles:roles=(*roles,'document')
+            new_discovery_pass=bool(manual_start and stage=='discovery' and row['discovery_status']=='complete')
             now = timestamp()
             db.execute("UPDATE pipelines SET stop_requested=0,status='queued',stage='processing',blockers='[]',dashboard_hidden=0,finished_at=NULL,updated_at=? WHERE id=?",
                        (now, pipeline_id))
             resume_epoch = uuid.uuid4().hex
             for saved in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND turn_active=0 "
                                     "AND state NOT IN ('completed','discarded','superseded','uncertain','session_missing')", (pipeline_id,)).fetchall():
+                if roles is not None and saved['role'] not in roles:
+                    continue
+                if new_discovery_pass and saved['role']=='discovery':continue
                 if trial and trial.get('allowed_worker_ids') and saved['id'] not in trial['allowed_worker_ids']:
                     continue
                 if trial and (saved['role']=='discovery' and trial['max_discovery_invocations']==0 or saved['role']!='discovery' and saved['job_id'] not in trial['job_ids']):
@@ -4425,6 +4459,9 @@ class Store:
                 self._agent_prepare_browser_resume(db, saved, resume_epoch, now, "user explicitly resumed this pipeline")
             for worker in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND state IN ('stopped','interrupted','failed','quota_paused')",
                                      (pipeline_id,)).fetchall():
+                if roles is not None and worker['role'] not in roles:
+                    continue
+                if new_discovery_pass and worker['role']=='discovery':continue
                 if trial and trial.get('allowed_worker_ids') and worker['id'] not in trial['allowed_worker_ids']:
                     continue
                 if trial and (worker['role']=='discovery' and trial['max_discovery_invocations']==0 or worker['role']!='discovery' and worker['job_id'] not in trial['job_ids']):
@@ -4477,6 +4514,8 @@ class Store:
             # makes the child reject its parent's non-waiting state.
             for parent in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND role='submission' AND state='queued'",
                                      (pipeline_id,)).fetchall():
+                if roles is not None and 'submission' not in roles:
+                    continue
                 context = self._agent_decode(parent["context"], {})
                 if not context.get("requested_artifacts") or self._context_may_have_sent_final(context, parent["checkpoint"]):
                     continue
@@ -4489,8 +4528,24 @@ class Store:
                                                 "AND (state IN ('running','waiting_child') OR turn_active=1)", (pipeline_id,)).fetchone()[0]
                     if active_parents < 3:
                         db.execute("UPDATE agent_workers SET state='waiting_child',checkpoint='waiting_child',updated_at=? WHERE id=?", (now, parent["id"]))
+            if new_discovery_pass:
+                fresh=self._agent_insert_worker(db,pipeline_id,'discovery',context={'operator_instructions':
+                    'The user explicitly started a new discovery pass. Recheck the current careers site for all '
+                    'CS-related roles matching the saved filters. The previous pass is complete; it is context, '
+                    'not a reason to stop this fresh pass. Persist full descriptions, exact URLs and requisition '
+                    'IDs through record_listing; the dashboard retains prior records and rejects duplicates.'})
+                for prior in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND role='discovery' "
+                        "AND id!=? AND turn_active=0 AND state NOT IN ('completed','discarded','superseded')",(pipeline_id,fresh)).fetchall():
+                    context=self._agent_decode(prior['context'],{})
+                    context['snapshot_supersession']={'reason':'Explicit new discovery pass after completed coverage',
+                        'replacement_worker_id':fresh,'superseded_at':now}
+                    db.execute("UPDATE agent_workers SET state='superseded',context=?,updated_at=? WHERE id=?",
+                        (json.dumps(context),now,prior['id']))
+                db.execute("UPDATE pipelines SET discovery_status='pending',discovery_payload='{}' WHERE id=?",(pipeline_id,))
+                self.event(db,'agent.manual_discovery_pass_started',{'pipeline_id':pipeline_id,'worker_id':fresh,
+                    'previous_discovery':self._agent_decode(row['discovery_payload'],{})},actor='user')
             self._agent_wake_orphaned_auth_waiters(db)
-            self.event(db, "agent.pipeline_resumed", {"pipeline_id": pipeline_id}, actor="user")
+            self.event(db, "agent.pipeline_resumed", {"pipeline_id": pipeline_id,'manual_start':manual_start,'stage':stage}, actor="user")
             self._agent_refresh_pipeline(db, pipeline_id)
         return self.get_pipeline(pipeline_id)
 

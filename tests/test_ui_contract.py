@@ -56,6 +56,16 @@ class IsolatedAgentManager:
     def resume(self, pipeline_id):
         return self.view(pipeline_id)
 
+    def start_campaign(self,pipeline_id):
+        self.store.resume_agent_pipeline(pipeline_id,manual_start=True)
+        self.schedule()
+        return self.view(pipeline_id)
+
+    def start_stage(self,pipeline_id,stage):
+        self.store.resume_agent_pipeline(pipeline_id,manual_start=True,stage=stage)
+        self.schedule()
+        return self.view(pipeline_id)
+
     def schedule(self):
         self.schedule_calls += 1
 

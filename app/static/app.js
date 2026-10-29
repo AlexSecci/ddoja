@@ -793,20 +793,22 @@ function renderPipeline(view) {
     stop.disabled = !pipelineCurrent || p.status === 'stopping'; controls.append(stop);
   } else if (['stopped', 'interrupted', 'failed', 'blocked'].includes(p.status)) {
     const resume = button('Start campaign', 'quiet-button', () => pipelineAction(p.id, 'resume'));
+    resume.title = 'Resume the campaign with its enabled stages. Individual stage buttons can start just one stage.';
     resume.disabled = !pipelineCurrent || Boolean(quota.paused); controls.append(resume);
   }
   if (p.mode === 'agentic' && p.status !== 'completed') {
     ['discovery', 'evaluation', 'submission'].forEach(stage => {
-      const paused = Boolean(p[stage + '_paused']);
+      const campaignStopped = Boolean(p.stop_requested) || p.status === 'stopped';
+      const paused = campaignStopped || Boolean(p[stage + '_paused']);
       const control = button((paused ? 'Start ' : 'Stop ') + stage, 'quiet-button', async () => {
         try {
           await api('pipelines/' + segment(p.id) + '/dispatch', {method: 'POST', body: JSON.stringify({stage, paused: !paused})});
-          setStatus('New ' + stage + ' tasks ' + (paused ? 'enabled.' : 'paused. Already-started applications finish normally.'));
+          setStatus(paused ? stage[0].toUpperCase() + stage.slice(1) + ' started.' + (campaignStopped ? ' Other stages remain paused.' : '') : 'New ' + stage + ' tasks paused. Already-started applications finish normally.');
           await refreshDashboard();
         } catch (error) { setStatus(error.message, true); }
       });
-      control.title = 'Controls new ' + stage + ' work. Started tasks retain their progress; a stopped campaign must be started separately.';
-      control.disabled = !pipelineCurrent;
+      control.title = 'Start or pause ' + stage + '. Starting from a stopped campaign starts only this stage; other stages remain paused.';
+      control.disabled = !pipelineCurrent || p.status === 'stopping' || (paused && Boolean(quota.paused));
       controls.append(control);
     });
   }
