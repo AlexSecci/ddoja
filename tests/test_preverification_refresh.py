@@ -42,7 +42,7 @@ def test_later_browser_input_or_verified_send_prevents_initial_challenge_refresh
     assert s.get_agent_worker(wid)['context']['final_action_may_have_been_sent'] is True
 
 
-@pytest.mark.parametrize('form',['enabled','redacted','disabled','partial','wrong_url','challenge','receipt'])
+@pytest.mark.parametrize('form',['enabled','redacted','disabled','partial','filename','wrong_url','challenge','receipt'])
 def test_refresh_requires_new_full_exact_enabled_form_and_is_single_use(tmp_path,monkeypatch,form):
     s,p,j,wid,observe,prefix,challenge=prepare(tmp_path,monkeypatch)
     recovered=s.recover_pending_email_verification(wid,'Scoped recovery',True)
@@ -54,7 +54,7 @@ def test_refresh_requires_new_full_exact_enabled_form_and_is_single_use(tmp_path
     if form=='receipt':text+='\nThank you for applying. Your application has been received.'
     if form=='redacted':
         with s.connect(write=True) as db:s._agent_set_browser_control(db,'company:'+p['company_id'],'company_auth','open','Fixture auth','Fixture',wid,[])
-    eid=observe(text,args={'depth':1} if form=='partial' else {})
+    eid=observe(text,args={'depth':1} if form=='partial' else {'filename':'synthetic-form.yml'} if form=='filename' else {})
     with s.connect(write=True) as db:
         w=db.execute('SELECT w.*,p.company_id,p.stop_requested FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?',(wid,)).fetchone()
         if form=='redacted':
@@ -62,7 +62,11 @@ def test_refresh_requires_new_full_exact_enabled_form_and_is_single_use(tmp_path
             assert payload['authentication_redacted'] and payload['preverification_form_observation']=={'full_snapshot':True,'submit_enabled':True}
             assert 'Snapshot' not in json.dumps(payload)
             s._agent_browser_control_action(db,w,{'operation':'complete_auth','reason':'Fixture exact form restored'})
-        if form not in {'enabled','redacted'}:
+        if form in {'partial','filename'}:
+            result=s._agent_begin_final_action(db,w,{})
+            assert result['authorized'] is False and result['inline_snapshot_required'] is True
+            assert json.loads(w['context'])['preverification_refresh']['consumed'] is False
+        elif form not in {'enabled','redacted'}:
             with pytest.raises(Conflict):s._agent_begin_final_action(db,w,{})
         else:
             assert s._agent_begin_final_action(db,w,{})['authorized'] is True
@@ -95,3 +99,22 @@ def test_reserved_form_recovery_cannot_replay_a_consumed_or_possible_send(tmp_pa
         assert w['state']=='queued' and w['context']['final_action_may_have_been_sent'] is True
         assert w['context']['preverification_refresh']['consumed'] is False
         with pytest.raises(Conflict):s.recover_reserved_preverification_form(wid,'No duplicate recovery')
+
+
+def test_each_operator_continuation_requires_new_native_evidence(tmp_path,monkeypatch):
+    s,p,j,wid,observe,prefix,challenge=prepare(tmp_path,monkeypatch)
+    s.recover_pending_email_verification(wid,'Scoped refresh',True)
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='running',turn_active=1 WHERE id=?",(wid,))
+    observe(prefix,tool='browser_navigate',args={'url':j['url']})
+    observe(prefix+'- button "Submit application" [ref=submit]')
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='uncertain',turn_active=0 WHERE id=?",(wid,))
+    s.recover_reserved_preverification_form(wid,'First logging correction')
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='uncertain' WHERE id=?",(wid,))
+    with pytest.raises(Conflict,match='new native'):s.recover_reserved_preverification_form(wid,'Same evidence')
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='running' WHERE id=?",(wid,))
+    observe(prefix+'- button "Submit application" [ref=submit]')
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='uncertain' WHERE id=?",(wid,))
+    w=s.recover_reserved_preverification_form(wid,'New post-recovery form evidence')
+    assert w['context']['preverification_refresh']['restored_recovery_count']==2
+    with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='uncertain' WHERE id=?",(wid,))
+    with pytest.raises(Conflict,match='new native'):s.recover_reserved_preverification_form(wid,'Same evidence refused')

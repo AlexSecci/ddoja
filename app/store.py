@@ -2646,7 +2646,8 @@ class Store:
             context=self._agent_decode(w['context'],{});refresh=context.get('preverification_refresh') or {}
             quota=db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone();trial=read_trial(db,w['pipeline_id'])
             job=db.execute('SELECT * FROM jobs WHERE id=?',(w['job_id'],)).fetchone()
-            if (not refresh or refresh.get('consumed') or refresh.get('restored_recovery')
+            recovery_count=refresh.get('restored_recovery_count',1 if refresh.get('restored_recovery') else 0)
+            if (not refresh or refresh.get('consumed')
                     or quota and self._agent_decode(quota[0],{}).get('paused')
                     or trial and (trial['state']!='active' or expired(trial) or w['job_id'] not in trial['job_ids'])
                     or not job or job['jd_version']!=w['jd_version'] or self.profile_version(db)!=w['profile_version']
@@ -2665,12 +2666,17 @@ class Store:
                 "AND json_extract(payload,'$.verification_observation.present')=1 LIMIT 1",(worker_id,navigation[0])).fetchone() if navigation else True
             if possible_click or challenge:raise Conflict('A subsequent possible send or code challenge requires reconciliation.')
             evidence=self._agent_latest_cua_event(db,w,success=True)
+            if evidence['event_id']==(refresh.get('restored_recovery') or {}).get('source_event_id'):
+                raise Conflict('Continuation needs a new native form observation after the previous recovery.')
             refresh['restored_recovery']={'source_event_id':evidence['event_id'],'at':timestamp()}
+            refresh['restored_recovery_count']=recovery_count+1
             context['operator_instructions']=('The existing reserved refresh is still UNCONSUMED; native history '
                 'shows no subsequent Submit, and the restored exact form is ready. The redaction/guard bug is '
                 'fixed. Do not reload, refill, regenerate documents or replace the tab. Take browser_snapshot '
                 'with empty arguments; complete_auth only if you own an open company gate and the fresh exact '
-                'form verifies that recovery. Then call begin_final_action once to consume the already reserved '
+                'form verifies that recovery. AFTER complete_auth returns closed, take another FULL '
+                'browser_snapshot with empty arguments so begin_final_action sees post-recovery evidence. '
+                'Then call begin_final_action once to consume the already reserved '
                 'refresh. Request/receive the fresh code through awaiting_email_token_handoff and retain all '
                 'actual human approval requirements before the verification Submit. A refusal or ambiguous '
                 'send must stop this job; do not loop or clear the preserved send flag.')
@@ -6961,6 +6967,12 @@ class Store:
                 self.event(db,'agent.preverification_refresh_consumed',{'worker_id':worker['id'],
                     'source_event_id':refresh['source_event_id'],'send_flag_preserved':True,
                     'approval_granted':False},worker['job_id'],'agent_runtime')
+            elif refresh and not refresh.get('consumed') and self._agent_needs_inline_snapshot(db,worker):
+                return {'authorized':False,'inline_snapshot_required':True,
+                    'instruction':'The last browser_snapshot saved a file or used target/depth. No Submit is authorized. '
+                    'Call browser_snapshot with exactly {}: omit filename, target and depth entirely. Read its inline '
+                    'result, then call begin_final_action again. This is an observation correction, not a possible-send '
+                    'reconciliation. Do not rebuild the form, click Submit or finish uncertain just because of this response.'}
             else:
                 self._agent_authorize_email_continuation(db,worker,context,email_verification)
         context["final_action_may_have_been_sent"] = True
@@ -6990,6 +7002,15 @@ class Store:
         payload=self._agent_decode(row['payload'],{})
         proof=payload.get('preverification_form_observation') or self._agent_preverification_form_observation(db,worker,payload)
         return bool(proof and proof.get('full_snapshot') and proof.get('submit_enabled'))
+
+    def _agent_needs_inline_snapshot(self,db,worker):
+        observed=self._agent_latest_cua_event(db,worker,success=True)
+        if not observed:return False
+        row=db.execute('SELECT tool_name,payload FROM agent_runtime_events WHERE id=?',(observed['event_id'],)).fetchone()
+        if not row or row['tool_name']!='playwright.browser_snapshot':return False
+        item=self._agent_decode(row['payload'],{}).get('transport_event',{}).get('item',{})
+        args=item.get('arguments') or {}
+        return isinstance(args,dict) and any(args.get(key) is not None for key in ('filename','target','depth'))
 
     def _agent_authorize_email_continuation(self,db,worker,context,email_verification):
         from .ephemeral_auth import final_scope
