@@ -226,7 +226,7 @@ def test_migration_preserves_legacy_workers_and_keeps_old_assessments_unscored(t
         db.execute("DROP INDEX pipeline_jobs_fit")
         for column in ["fit_score", "fit_payload", "fit_jd_version", "fit_profile_version"]:
             db.execute("ALTER TABLE pipeline_jobs DROP COLUMN " + column)
-        for column in ["evaluation_paused", "submission_paused"]:
+        for column in ["discovery_paused", "evaluation_paused", "submission_paused"]:
             db.execute("ALTER TABLE pipelines DROP COLUMN " + column)
     reopened = Store(tmp_path)
     assert reopened.list_agent_workers(pipeline["id"]) == before
@@ -295,3 +295,36 @@ def test_evaluation_only_batch_ends_after_scores_without_submitting(tmp_path):
                   "allowed_roles":["evaluator"],"max_invocations":None,"deadline_unix":None}
         assert "evaluation-only" in stop_reason(db,policy)
     assert submissions(store,pipeline) == []
+
+
+def test_discovery_switch_blocks_its_next_turn_without_pausing_evaluation(tmp_path):
+    store, pipeline, discovery, _, _ = seed(tmp_path, 1)
+    with store.connect(write=True) as db:
+        db.execute("UPDATE agent_workers SET state='queued',turn_active=0 WHERE id=?", (discovery["id"],))
+    store.set_stage_dispatch(pipeline["id"], "discovery", True)
+    assert store.get_pipeline(pipeline["id"])["discovery_paused"]
+    assert not store.reserve_agent_worker(discovery["id"])
+    assert store.reserve_agent_worker(evaluators(store,pipeline)[0]["id"])
+    store.set_stage_dispatch(pipeline["id"], "discovery", False)
+    assert store.reserve_agent_worker(discovery["id"])
+
+
+def test_discovery_switch_is_authenticated_and_does_not_resume_stopped_campaign(tmp_path):
+    from test_ui_contract import _client
+    app,client,headers,_ = _client(tmp_path)
+    store=app.state.store;pipeline=store.create_agent_pipeline("Fixture Controls","https://fictional.invalid/careers")
+    store.request_pipeline_stop(pipeline["id"])
+    response=client.post('/api/pipelines/'+pipeline['id']+'/dispatch',headers=headers,json={'stage':'discovery','paused':True})
+    assert response.status_code==200 and response.json()['pipeline']['discovery_paused']
+    assert store.get_pipeline(pipeline['id'])['stop_requested']
+
+
+def test_application_batch_finishes_when_closed_job_has_durable_discard(tmp_path):
+    from app.trial_limits import stop_reason
+    store,pipeline,discovery,_,_=seed(tmp_path,1)
+    worker=evaluators(store,pipeline)[0]
+    with store.connect(write=True) as db:
+        db.execute("UPDATE agent_workers SET turn_active=0 WHERE role='discovery'")
+        db.execute("UPDATE pipeline_jobs SET agent_status='discarded' WHERE pipeline_id=?",(pipeline['id'],))
+        policy={'pipeline_id':pipeline['id'],'job_ids':[worker['job_id']],'execution_watermark':0,'max_invocations':None,'deadline_unix':None,'allowed_roles':['submission','document']}
+        assert 'terminal results' in stop_reason(db,policy)

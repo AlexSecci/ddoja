@@ -63,7 +63,10 @@ def stop_reason(db, policy):
             "CAST((SELECT value FROM meta WHERE key='profile_version') AS INTEGER)) LIMIT 1",
             [policy["pipeline_id"], *policy["job_ids"]]).fetchone()
         return "All jobs selected for the evaluation-only batch have current fit scores." if not remaining and not active else None
-    remaining = db.execute("SELECT 1 FROM jobs WHERE id IN (" + placeholders + ") AND phase NOT IN ('submitted','discarded') LIMIT 1", policy["job_ids"]).fetchone()
+    remaining = db.execute("SELECT 1 FROM jobs j LEFT JOIN pipeline_jobs pj ON pj.job_id=j.id AND pj.pipeline_id=? "
+        "WHERE j.id IN (" + placeholders + ") AND j.phase NOT IN ('submitted','discarded') "
+        "AND COALESCE(pj.agent_status,'') NOT IN ('submitted','discarded') LIMIT 1",
+        [policy["pipeline_id"], *policy["job_ids"]]).fetchone()
     # A committed receipt precedes the same turn's safe tab cleanup and usage
     # report. Admission is already closed to other tasks; let that turn exit.
     if not remaining and not active:

@@ -202,8 +202,8 @@ class Store:
             return {"pipeline_id":pipeline_id,"queued":queued,"count":len(queued)}
 
     def set_stage_dispatch(self, pipeline_id, stage, paused):
-        if stage not in {"evaluation", "submission"} or type(paused) is not bool:
-            raise ValueError("Choose evaluation or submission and a boolean pause state.")
+        if stage not in {"discovery", "evaluation", "submission"} or type(paused) is not bool:
+            raise ValueError("Choose discovery, evaluation or submission and a boolean pause state.")
         with self.connect(write=True) as db:
             pipeline = db.execute("SELECT mode FROM pipelines WHERE id=?",(pipeline_id,)).fetchone()
             if not pipeline or pipeline["mode"] != "agentic":
@@ -243,6 +243,7 @@ class Store:
                     ("adopted_from_pipeline_id", "TEXT"),
                     ("agent_test_only", "INTEGER NOT NULL DEFAULT 0"),
                     ("dashboard_hidden", "INTEGER NOT NULL DEFAULT 0"),
+                    ("discovery_paused", "INTEGER NOT NULL DEFAULT 0"),
                     ("evaluation_paused", "INTEGER NOT NULL DEFAULT 0"),
                     ("submission_paused", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in pipeline_columns:
@@ -506,6 +507,7 @@ class Store:
         result["careers_url"] = company["careers_url"] if company else ""
         result["stop_requested"] = bool(result["stop_requested"])
         result["dashboard_hidden"] = bool(result.get("dashboard_hidden", 0))
+        result["discovery_paused"] = bool(result.get("discovery_paused", 0))
         result["evaluation_paused"] = bool(result.get("evaluation_paused", 0))
         result["submission_paused"] = bool(result.get("submission_paused", 0))
         result["counts"] = (self._agent_pipeline_counts(db, result["id"])
@@ -3934,7 +3936,7 @@ class Store:
     def reserve_agent_worker(self, worker_id):
         with self.connect(write=True) as db:
             row = db.execute("SELECT w.*,p.company_id,p.stop_requested,p.status AS pipeline_status,p.mode,"
-                             "p.evaluation_paused,p.submission_paused "
+                             "p.discovery_paused,p.evaluation_paused,p.submission_paused "
                              "FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?",
                              (worker_id,)).fetchone()
             if not row:
@@ -3942,6 +3944,8 @@ class Store:
             if row["state"] != "queued" or row["mode"] != "agentic" or row["stop_requested"]:
                 return False
             if row["pipeline_status"] in {"stopped", "stopping", "completed"}:
+                return False
+            if row["role"] == "discovery" and row["discovery_paused"]:
                 return False
             if row["started_at"] is None and ((row["role"] == "evaluator" and row["evaluation_paused"])
                                              or (row["role"] == "submission" and row["submission_paused"])):

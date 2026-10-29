@@ -43,7 +43,7 @@ class WorkerChoice(Strict):
 
 
 class StageDispatchInput(Strict):
-    stage: Literal["evaluation", "submission"]
+    stage: Literal["discovery", "evaluation", "submission"]
     paused: bool = Field(strict=True)
 
 

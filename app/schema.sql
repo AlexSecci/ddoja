@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS pipelines(
  mode TEXT NOT NULL DEFAULT 'legacy', adopted_from_pipeline_id TEXT,
  agent_test_only INTEGER NOT NULL DEFAULT 0,
  dashboard_hidden INTEGER NOT NULL DEFAULT 0,
+ discovery_paused INTEGER NOT NULL DEFAULT 0,
  evaluation_paused INTEGER NOT NULL DEFAULT 0, submission_paused INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, updated_at TEXT NOT NULL
 );

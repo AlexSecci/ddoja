@@ -788,23 +788,24 @@ function renderPipeline(view) {
   footer.append(element('span', p.created_at ? 'Created ' + dateText(p.created_at) : '', 'sub'));
   const controls = element('div', undefined, 'pipeline-actions');
   if (['queued', 'running', 'stopping', 'awaiting_user', 'quota_paused'].includes(p.status)) {
-    const stop = button(p.status === 'stopping' ? 'Stopping…' : 'Stop this company', 'quiet-button',
+    const stop = button(p.status === 'stopping' ? 'Stopping…' : 'Stop campaign', 'quiet-button',
       () => pipelineAction(p.id, 'stop'));
     stop.disabled = !pipelineCurrent || p.status === 'stopping'; controls.append(stop);
   } else if (['stopped', 'interrupted', 'failed', 'blocked'].includes(p.status)) {
-    const resume = button('Resume this company', 'quiet-button', () => pipelineAction(p.id, 'resume'));
+    const resume = button('Start campaign', 'quiet-button', () => pipelineAction(p.id, 'resume'));
     resume.disabled = !pipelineCurrent || Boolean(quota.paused); controls.append(resume);
   }
   if (p.mode === 'agentic' && p.status !== 'completed') {
-    ['evaluation', 'submission'].forEach(stage => {
+    ['discovery', 'evaluation', 'submission'].forEach(stage => {
       const paused = Boolean(p[stage + '_paused']);
-      const control = button((paused ? 'Enable new ' : 'Pause new ') + (stage === 'evaluation' ? 'evaluations' : 'submissions'), 'quiet-button', async () => {
+      const control = button((paused ? 'Start ' : 'Stop ') + stage, 'quiet-button', async () => {
         try {
           await api('pipelines/' + segment(p.id) + '/dispatch', {method: 'POST', body: JSON.stringify({stage, paused: !paused})});
           setStatus('New ' + stage + ' tasks ' + (paused ? 'enabled.' : 'paused. Already-started applications finish normally.'));
           await refreshDashboard();
         } catch (error) { setStatus(error.message, true); }
       });
+      control.title = 'Controls new ' + stage + ' work. Started tasks retain their progress; a stopped campaign must be started separately.';
       control.disabled = !pipelineCurrent;
       controls.append(control);
     });
