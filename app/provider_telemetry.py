@@ -7,6 +7,7 @@ import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from pathlib import Path
 import threading
 import time
 import uuid
@@ -16,6 +17,78 @@ from .request_metrics import RequestMetrics
 
 def canonical(value):return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
 def fingerprint(value):return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def native_worker_tools(root, worker):
+    """Expose the same registered MCP schemas directly, avoiding native tool_search.
+
+    DeepSeek's native tool-search calls can arrive as literal DSML text. The
+    CLI already registers these MCP handlers, so a normal namespaced function
+    call can invoke them without a separate deferred-schema lookup.
+    """
+    context=worker.get('context') or {}
+    if isinstance(context,str):context=json.loads(context)
+    contract_id=context.get('instruction_contract_id')
+    if contract_id:
+        from .worker_contracts import load
+        bridge=load(root,worker['id'],contract_id)['agent_tools']
+    else:
+        from tools.agent_mcp import ROLE_TOOLS,TOOL_DEFINITIONS
+        bridge=[{'name':n,**TOOL_DEFINITIONS[n]} for n in ROLE_TOOLS[worker['role']]]
+
+    def namespace(name,definitions):
+        return {'type':'namespace','name':name,'description':'Tools in the '+name+' namespace.',
+                'tools':[{'type':'function','name':t['name'],'description':t.get('description',''),
+                          'parameters':t['inputSchema'],'strict':False} for t in definitions]}
+
+    catalog=[namespace('mcp__agent_bridge',bridge)]
+    backend=(context.get('execution') or {}).get('browser_backend','none')
+    if backend=='playwright':
+        if not contract_id:raise ValueError('A pinned browser catalog is required for direct Playwright tools.')
+        path=Path(root)/'data/worker-contracts'/worker['id']/(contract_id+'.browser.json')
+        # The required MCP browser finishes initialization before the CLI's
+        # first inference request and saves its exact advertised schemas here.
+        saved=json.loads(path.read_text(encoding='utf-8'))
+        from .browser_backends import PLAYWRIGHT_TOOLS
+        if saved.get('sha256')!=fingerprint(saved['tools']) or not {t['name'] for t in saved['tools']}<=set(PLAYWRIGHT_TOOLS):
+            raise ValueError('Pinned browser schemas failed integrity or scope validation.')
+        catalog.append(namespace('mcp__playwright',saved['tools']))
+    return catalog
+
+
+def scoped_tools(tools, role, backend):
+    """Advertise only the worker's existing bridge/browser allowlist.
+
+    CLI host tools are useful for coding, but are not workflow capabilities.
+    Filtering schemas prevents misleading probes; runtime/Store checks remain.
+    """
+    from tools.agent_mcp import ROLE_TOOLS
+    from .browser_backends import PLAYWRIGHT_TOOLS
+    allowed={'mcp__agent_bridge':set(ROLE_TOOLS[role])}
+    if role in {'discovery','evaluator','submission'}:
+        if backend=='playwright':allowed['mcp__playwright']=set(PLAYWRIGHT_TOOLS)
+        elif backend=='cua':allowed['mcp__cua_repl']={'js'}
+
+    def keep(tool, namespace=None):
+        if not isinstance(tool,dict):return None
+        # Current CLI versions defer MCP schemas behind client-side tool_search.
+        # Their loaded tools arrive in tool_search_output input items, rather
+        # than the initial top-level tools list. Keep this registry lookup;
+        # only scoped MCP servers are configured by the worker launch.
+        if tool.get('type')=='tool_search' and tool.get('execution')=='client':return tool
+        name=tool.get('name','')
+        if tool.get('type')=='namespace':
+            children=[value for child in tool.get('tools',[]) if (value:=keep(child,name)) is not None]
+            return {**tool,'tools':children} if children else None
+        if tool.get('type')!='function':return None
+        scope=tool.get('namespace',namespace)
+        if scope in allowed and name in allowed[scope]:return tool
+        # Older CLI catalogs flatten MCP-qualified names instead of namespaces.
+        for prefix,names in allowed.items():
+            if name in {prefix+'__'+n for n in names}:return tool
+        return None
+
+    return [value for tool in tools if (value:=keep(tool)) is not None]
 
 
 def request_shape(body, previous=()):
@@ -35,8 +108,10 @@ def request_shape(body, previous=()):
 
 
 class ProviderTelemetry:
-    def __init__(self, root, worker_id, run_id, execution, key, *, upstream='https://api.deepseek.com'):
+    def __init__(self, root, worker_id, run_id, execution, key, *, upstream='https://api.deepseek.com', role=None, tool_catalog=None):
         self.metrics=RequestMetrics(root);self.worker_id=worker_id;self.run_id=run_id;self.execution=execution
+        self.role=role
+        self.catalog_source=tool_catalog;self.catalog=None
         self.key=key;self.upstream=upstream;self.nonce=uuid.uuid4().hex;self.previous=[];self.lock=threading.Lock()
         owner=self
         class Handler(BaseHTTPRequestHandler):
@@ -54,9 +129,24 @@ class ProviderTelemetry:
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0<length<=64*1024*1024:raise ValueError('Invalid provider request size.')
                     body=json.loads(self.rfile.read(length))
-                    if isinstance(body.get('tools'),list):body['tools']=sorted(body['tools'],key=lambda t:(t.get('type',''),t.get('name',t.get('function',{}).get('name',''))))
+                    offered=len(body.get('tools',[]))
+                    if isinstance(body.get('tools'),list):
+                        if owner.role is not None:body['tools']=scoped_tools(body['tools'],owner.role,owner.execution.get('browser_backend','none'))
+                        if owner.catalog_source is not None:
+                            with owner.lock:
+                                if owner.catalog is None:owner.catalog=owner.catalog_source()
+                            body['tools']=[t for t in body['tools'] if t.get('type')!='tool_search']
+                            groups={(t.get('type'),t.get('name')):t for t in body['tools']}
+                            groups.update({(t.get('type'),t.get('name')):t for t in owner.catalog})
+                            body['tools']=list(groups.values())
+                        if owner.role is not None and offered and not body['tools']:
+                            raise ValueError('The CLI tool catalog has no supported scoped tools or client-side MCP lookup.')
+                        body['tools']=sorted(body['tools'],key=lambda t:(t.get('type',''),t.get('name',t.get('function',{}).get('name',''))))
                     with owner.lock:
                         metadata,owner.previous=request_shape(body,owner.previous)
+                    if owner.role is not None:
+                        metadata.update(offered_tool_groups=offered,scoped_tool_groups=len(body.get('tools',[])))
+                    if owner.catalog_source is not None:metadata['direct_mcp_schemas']=True
                     owner.record(request_id,started,'started',metadata)
                     with httpx.Client(timeout=httpx.Timeout(180),trust_env=False,follow_redirects=False) as client:
                         with client.stream('POST',owner.upstream+'/responses',content=canonical(body).encode(),

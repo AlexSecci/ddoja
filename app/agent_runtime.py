@@ -282,7 +282,8 @@ class CodexAgentRuntime:
         args = [self.codex, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
                 "--color", "never", "--model", choice["model"], "-c", f'model_provider="{provider}"',
                 "-c", f"model_reasoning_effort={_toml_string(effort)}",
-                "-c", 'web_search="disabled"', "--output-schema", str(schema_path)]
+                "-c", 'web_search="disabled"', "-c", 'features.shell_tool=false',
+                "--output-schema", str(schema_path)]
         if provider == "openai":
             args.extend(["-c", 'forced_login_method="chatgpt"'])
         elif provider == "deepseek":
@@ -379,7 +380,18 @@ class CodexAgentRuntime:
         return {"provider": "openai", "browser_backend": "none" if worker["role"] == "document" else "cua", **(choice or {})}
 
     def _prompt(self, task, worker):
-        result = self._base_prompt(task, worker)
+        routing = ('TOOL ROUTING: Your first workflow call is mcp__agent_bridge.get_context, optionally with the exact needed source_ids. '
+                  'The CLI may defer its schemas: if bridge tools are not visible, first use the advertised tool_search '
+                  'with query "agent_bridge get_context retrieve_sources finish_evaluation" (or your role\'s finish action). '
+                  'Then call the returned bridge tool; resource listing and shell probes cannot load it. Source handles are bridge '
+                  'identifiers, not filesystem paths. Do not probe a shell, list MCP resources, search unrelated tool catalogs '
+                  'or test placeholder commands. Only your role bridge and assigned browser adapter are available.\n\n')
+        if self._choice(worker).get('provider')=='deepseek':
+            routing=('TOOL ROUTING: Your exact role MCP schemas are supplied directly. First call '
+                    'mcp__agent_bridge.get_context, optionally with needed source_ids, then use the advertised '
+                    'bridge/browser functions. Do not use tool_search, resource listing, shell probes or placeholder '
+                    'commands. Source handles are bridge identifiers, not filesystem paths.\n\n')
+        result=routing+self._base_prompt(task,worker)
         from .efficiency_features import features
         contract_id = (task.get('task_context') or {}).get('instruction_contract_id')
         contract = None
@@ -778,7 +790,9 @@ class CodexAgentRuntime:
                     raise AgentRuntimeError("DeepSeek API key is not configured. Open Settings to add it.")
                 env["DEEPSEEK_API_KEY"] = key
                 from .provider_telemetry import ProviderTelemetry
-                provider_proxy = ProviderTelemetry(self.root,worker['id'],run_id,choice,key)
+                from .provider_telemetry import native_worker_tools
+                provider_proxy = ProviderTelemetry(self.root,worker['id'],run_id,choice,key,role=worker['role'],
+                    tool_catalog=lambda:native_worker_tools(self.root,worker))
                 worker['_provider_base_url'] = provider_proxy.url
             elif not self._login_ok(env):
                 return finish({"disposition": "failed", "session_id": worker.get("session_id"),
@@ -900,8 +914,9 @@ class CodexAgentRuntime:
             if access_violation:
                 tool_violation = tool_violation or access_violation
                 try:
+                    detail = {k: str(item[k])[:120] for k in ('server', 'tool') if isinstance(item, dict) and k in item}
                     on_event({"type": "tool_policy_violation", "tool_type": access_violation,
-                              "session_id": last_session})
+                              "session_id": last_session, **detail})
                 except Exception as error:
                     callback_failure = str(error)
                 if stop_sent_at is None:

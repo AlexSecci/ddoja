@@ -60,7 +60,8 @@ def test_contract_is_role_specific_immutable_and_new_workers_get_changes(tmp_pat
 
 
 @pytest.mark.parametrize('stream',[True,False])
-def test_relay_persists_actual_usage_and_canonicalizes_without_logging_content(tmp_path,stream):
+@pytest.mark.parametrize('scope',[None,'evaluator'])
+def test_relay_persists_actual_usage_and_canonicalizes_without_logging_content(tmp_path,stream,scope):
     received=[]
     usage={'input_tokens':1000,'input_tokens_details':{'cached_tokens':900},'output_tokens':20,'output_tokens_details':{'reasoning_tokens':5}}
     class Upstream(BaseHTTPRequestHandler):
@@ -74,15 +75,26 @@ def test_relay_persists_actual_usage_and_canonicalizes_without_logging_content(t
             for i in range(0,len(body),13):self.wfile.write(body[i:i+13]);self.wfile.flush()
     server=ThreadingHTTPServer(('127.0.0.1',0),Upstream)
     thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.02),daemon=True);thread.start()
-    relay=ProviderTelemetry(tmp_path,'test-worker','test-run',{'provider':'deepseek'},'fictional-private-key',upstream=f'http://127.0.0.1:{server.server_port}')
+    direct=[{'type':'namespace','name':'mcp__agent_bridge','tools':[
+        {'type':'function','name':'get_context','parameters':{'type':'object'}}]}]
+    relay=ProviderTelemetry(tmp_path,'test-worker','test-run',{'provider':'deepseek'},'fictional-private-key',upstream=f'http://127.0.0.1:{server.server_port}',role=scope,
+        tool_catalog=(lambda:direct) if scope else None)
     try:
         with httpx.Client(timeout=3,trust_env=False) as client:
             assert client.post(relay.url+'/responses',json={}).status_code==403
             payload={'stream':stream,'model':'fictional','instructions':'private applicant facts','input':[{'role':'user','content':'private prompt'}],
-                     'tools':[{'type':'function','name':'z'},{'name':'a','type':'function'}]}
+                     'tools':[{'type':'function','name':'z'},{'name':'a','type':'function'},
+                              {'type':'namespace','name':'mcp__agent_bridge','tools':[
+                                  {'type':'function','name':'get_context','parameters':{'type':'object'}},
+                                  {'type':'function','name':'finish_submission'}]}]}
+            if scope:payload['tools']=[{'type':'tool_search','execution':'client'},{'type':'function','name':'exec_command'}]
             response=client.post(relay.url+'/responses',json=payload,headers={'Authorization':'Bearer fictional-private-key'})
             assert response.status_code==200
-            assert b'"name":"a"' in received[0] and received[0].index(b'"name":"a"')<received[0].index(b'"name":"z"')
+            if scope is None:
+                assert b'"name":"a"' in received[0] and received[0].index(b'"name":"a"')<received[0].index(b'"name":"z"')
+            else:
+                assert json.loads(received[0])['tools']==[{'type':'namespace','name':'mcp__agent_bridge','tools':[
+                    {'type':'function','name':'get_context','parameters':{'type':'object'}}]}]
             deadline=time.monotonic()+1
             while time.monotonic()<deadline:
                 import sqlite3

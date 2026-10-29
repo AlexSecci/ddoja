@@ -4070,13 +4070,25 @@ class Store:
             return {"state": "interrupted", "resume_mode": "new_session",
                     "reason": "missing_saved_session", "error":
                     "Discovery made progress but has no saved runtime session; explicit resume is required."}
-        tab_id = context.get("tab_id")
-        tab_url = context.get("tab_url") or context.get("current_url")
-        if (tab_id is None or isinstance(tab_id, bool) or not str(tab_id).strip()
-                or not tab_url or not self._agent_url_allowed(tab_url, test_only=test_only)):
+        backend=(context.get('execution') or {}).get('browser_backend','cua')
+        if backend=='playwright':
+            from .browser_sessions import BrowserSessions
+            session=BrowserSessions(self.root).inspect(worker['id'])
+            capture=self._agent_capture_ref(db,worker)
+            text='\n'.join(b['text'] for b in (capture or {}).get('content',[]) if isinstance(b,dict) and isinstance(b.get('text'),str))
+            page=re.search(r'(?m)^- Page URL: (\S+)',text)
+            valid_browser=(session['state']=='live' and page is not None
+                           and self._agent_url_allowed(page[1],test_only=test_only))
+        else:
+            tab_id = context.get("tab_id")
+            tab_url = context.get("tab_url") or context.get("current_url")
+            valid_browser=(tab_id is not None and not isinstance(tab_id,bool) and bool(str(tab_id).strip())
+                           and bool(tab_url) and self._agent_url_allowed(tab_url,test_only=test_only))
+        if not valid_browser:
             return {"state": "interrupted", "resume_mode": "same_session",
                     "reason": "missing_owned_tab", "error":
-                    "Discovery made progress but its checkpoint lacks a valid owned tab and URL; explicit resume is required."}
+                    ("Discovery made progress but lacks a live worker-owned Playwright session and native page observation; explicit resume is required."
+                     if backend=='playwright' else "Discovery made progress but its checkpoint lacks a valid owned tab and URL; explicit resume is required.")}
         prior_context = context.get("discovery_turn_baseline")
         baseline = prior_context if isinstance(prior_context, dict) else {}
         current = self._agent_discovery_progress_snapshot(db, worker["pipeline_id"], context, coverage)
@@ -5723,7 +5735,8 @@ class Store:
                 coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
                 if status=='complete':
                     from .discovery_inventory import accounting
-                    declared=coverage.get('listing_total',coverage.get('enumerated_total'))
+                    declared=coverage.get('listing_total')
+                    if declared is None:declared=coverage.get('enumerated_total')
                     if declared is not None and (type(declared) is not int or declared<0):raise ValueError('The enumerated listing total must be a nonnegative integer.')
                     audit=accounting(db,worker['pipeline_id'],coverage,worker['id'])
                     if audit['pass_unreviewed_listings'] or audit['unaccounted_listings'] or audit['pass_historical_exclusions']:

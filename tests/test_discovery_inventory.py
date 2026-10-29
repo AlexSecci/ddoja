@@ -63,13 +63,14 @@ def test_all_observed_identities_count_without_creating_jds_or_evaluators(tmp_pa
     assert result['status']=='complete'
 
 
-@pytest.mark.parametrize('case',['unreviewed','missing'])
+@pytest.mark.parametrize('case',['unreviewed','missing','enumerated'])
 def test_complete_is_rejected_when_reported_listings_are_not_accounted_for(tmp_path,case):
     s,p,w,launch,_=fixture(tmp_path)
     if case=='unreviewed':board(s,w)
     with pytest.raises(Conflict,match='accounting is unresolved'):
         s.agent_action(w['id'],launch['capability'],'finish_discovery',{
-            'status':'complete','detail':'Must not be trusted.','coverage':{'listing_total':2}})
+            'status':'complete','detail':'Must not be trusted.',
+            'coverage':{'listing_total':None,'enumerated_total':2} if case=='enumerated' else {'listing_total':2}})
     assert s.get_agent_worker(w['id'])['state']=='running'
 
 

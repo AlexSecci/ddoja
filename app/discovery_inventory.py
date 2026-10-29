@@ -90,7 +90,8 @@ def summary(db,pipeline_id):
 
 def accounting(db,pipeline_id,coverage,worker_id=None):
     result=summary(db,pipeline_id)
-    expected=coverage.get('listing_total',coverage.get('enumerated_total'))
+    expected=coverage.get('listing_total')
+    if expected is None:expected=coverage.get('enumerated_total')
     expected=expected if type(expected) is int and expected>=0 else None
     if worker_id:
         current=db.execute('SELECT disposition,job_id,decision_source FROM agent_discovery_inventory WHERE pipeline_id=? AND worker_id=?',
