@@ -124,6 +124,7 @@ class AgentReplacement(Strict):
 class EmailVerificationRecovery(Strict):
     provenance: str = Field(min_length=1, max_length=1000)
     refresh_challenge: bool = False
+    resume_reserved_refresh: bool = False
 
 
 class ApplicationOutcomeInput(Strict):
@@ -815,7 +816,11 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
         worker = store.get_agent_worker(worker_id)
         if worker['pipeline_id'] != pipeline_id:
             raise Conflict('The worker belongs to another campaign.')
-        recovered = store.recover_pending_email_verification(worker_id, body.provenance, body.refresh_challenge)
+        if body.resume_reserved_refresh:
+            if body.refresh_challenge:raise Conflict('Choose one recovery mode.')
+            recovered=store.recover_reserved_preverification_form(worker_id,body.provenance)
+        else:
+            recovered = store.recover_pending_email_verification(worker_id, body.provenance, body.refresh_challenge)
         app.state.agent_pipeline_manager.schedule()
         return {'worker_id': recovered['id'], 'state': recovered['state'], 'approval_granted': False}
 

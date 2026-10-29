@@ -2633,6 +2633,51 @@ class Store:
                 'send_history_preserved': True, 'approval_granted': False}, w['job_id'], 'supervisor')
         return self.get_agent_worker(worker_id)
 
+    def recover_reserved_preverification_form(self,worker_id,provenance):
+        """Resume an unconsumed refresh after a logging/guard failure, never a send."""
+        from .trial_limits import read as read_trial, expired
+        if not isinstance(provenance,str) or not provenance.strip():raise ValueError('Recovery needs provenance.')
+        with self.connect(write=True) as db:
+            w=db.execute('SELECT w.*,p.stop_requested,p.status AS pipeline_status FROM agent_workers w '
+                'JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?',(worker_id,)).fetchone()
+            if (not w or w['role']!='submission' or w['turn_active'] or w['state'] not in {'uncertain','interrupted','failed'}
+                    or w['stop_requested'] or w['pipeline_status'] in {'stopped','stopping','completed'}):
+                raise Conflict('Only an inactive reserved form refresh in a running campaign can recover.')
+            context=self._agent_decode(w['context'],{});refresh=context.get('preverification_refresh') or {}
+            quota=db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone();trial=read_trial(db,w['pipeline_id'])
+            job=db.execute('SELECT * FROM jobs WHERE id=?',(w['job_id'],)).fetchone()
+            if (not refresh or refresh.get('consumed') or refresh.get('restored_recovery')
+                    or quota and self._agent_decode(quota[0],{}).get('paused')
+                    or trial and (trial['state']!='active' or expired(trial) or w['job_id'] not in trial['job_ids'])
+                    or not job or job['jd_version']!=w['jd_version'] or self.profile_version(db)!=w['profile_version']
+                    or job['phase']=='submitted' or self._agent_pending_inbox_wait(db,worker_id)
+                    or db.execute("SELECT 1 FROM agent_submission_results WHERE job_id=? AND state='submitted'",(w['job_id'],)).fetchone()
+                    or not self._agent_restored_preverification_form(db,w,refresh)):
+                raise Conflict('The current scope, form, admission or prior consumption prevents reserved recovery.')
+            source=db.execute('SELECT rowid FROM agent_runtime_events WHERE id=?',(refresh['source_event_id'],)).fetchone()
+            possible_click=db.execute("SELECT 1 FROM agent_runtime_events WHERE worker_id=? AND rowid>? AND success=1 "
+                "AND tool_name='playwright.browser_click' AND (json_extract(payload,'$.transport_event.item.arguments.element') IS NULL "
+                "OR lower(json_extract(payload,'$.transport_event.item.arguments.element')) LIKE '%submit%') LIMIT 1",(worker_id,source[0])).fetchone()
+            challenge=db.execute("SELECT 1 FROM agent_runtime_events WHERE worker_id=? AND rowid>? "
+                "AND json_extract(payload,'$.verification_observation.present')=1 LIMIT 1",(worker_id,source[0])).fetchone()
+            if possible_click or challenge:raise Conflict('A subsequent possible send or code challenge requires reconciliation.')
+            evidence=self._agent_latest_cua_event(db,w,success=True)
+            refresh['restored_recovery']={'source_event_id':evidence['event_id'],'at':timestamp()}
+            context['operator_instructions']=('The existing reserved refresh is still UNCONSUMED; native history '
+                'shows no subsequent Submit, and the restored exact form is ready. The redaction/guard bug is '
+                'fixed. Do not reload, refill, regenerate documents or replace the tab. Take browser_snapshot '
+                'with empty arguments; complete_auth only if you own an open company gate and the fresh exact '
+                'form verifies that recovery. Then call begin_final_action once to consume the already reserved '
+                'refresh. Request/receive the fresh code through awaiting_email_token_handoff and retain all '
+                'actual human approval requirements before the verification Submit. A refusal or ambiguous '
+                'send must stop this job; do not loop or clear the preserved send flag.')
+            db.execute("UPDATE agent_workers SET state='queued',context=?,error='',completed_at=NULL,resume_mode='same_session',"
+                "capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",(json.dumps(context),timestamp(),worker_id))
+            db.execute("UPDATE pipeline_jobs SET agent_status='submitting' WHERE pipeline_id=? AND job_id=?",(w['pipeline_id'],w['job_id']))
+            self.event(db,'agent.reserved_form_refresh_recovered',{'worker_id':worker_id,'source_event_id':evidence['event_id'],
+                'provenance':provenance,'send_flag_preserved':True,'approval_granted':False},w['job_id'],'supervisor')
+        return self.get_agent_worker(worker_id)
+
     def release_completed_auth_controls(self):
         """Retire orphan auth locks only after an inactive committed submission."""
         with self.connect(write=True) as db:
@@ -4677,6 +4722,9 @@ class Store:
                     verification=self._agent_verification_observation(db,row,event)
                     if verification:
                         metadata['verification_observation']=verification
+                    restored=self._agent_preverification_form_observation(db,row,event)
+                    if restored:
+                        metadata['preverification_form_observation']=restored
                     if success is not None and not success and self._agent_is_input_timeout(event):
                         metadata["browser_input_timeout"] = True
                     if success is not None and not success and self._agent_is_observation_timeout(event):
@@ -5875,6 +5923,22 @@ class Store:
             return proof
         return None
 
+    def _agent_preverification_form_observation(self,db,worker,payload):
+        url=self._agent_observed_application_url(db,worker,payload)
+        if not url or urlsplit(url).hostname!='job-boards.greenhouse.io':return None
+        item=payload.get('transport_event',{}).get('item',{})
+        if item.get('tool')!='browser_snapshot' or item.get('arguments'):return None
+        for block in (item.get('result') or {}).get('content',[]):
+            text=block.get('text','') if isinstance(block,dict) else ''
+            if '### Snapshot' not in text:continue
+            snapshot=text.split('### Snapshot',1)[1]
+            if ('enter the 8-character code to confirm' in snapshot or re.search(
+                    r'thank you for applying|application (?:has been|was) (?:received|submitted)',snapshot,re.I)):
+                return None
+            button=re.search(r'(?m)^\s*- button "Submit application"([^\n]*)',snapshot)
+            if button:return {'full_snapshot':True,'submit_enabled':'[disabled]' not in button.group(1)}
+        return None
+
     def _agent_scope_isolated_tab_approval(self, db, worker_id):
         """Keep an isolated job retry actionable without tying it to a later global outage."""
         worker = db.execute("SELECT w.*,j.url FROM agent_workers w JOIN jobs j ON j.id=w.job_id WHERE w.id=?", (worker_id,)).fetchone()
@@ -6916,21 +6980,13 @@ class Store:
         job=db.execute('SELECT url FROM jobs WHERE id=?',(worker['job_id'],)).fetchone()
         if not observed or not job or observed.get('application_url')!=job[0] or (observed.get('verification') or {}).get('present'):
             return False
-        row=db.execute('SELECT rowid,tool_name,payload FROM agent_runtime_events WHERE id=?',(observed['event_id'],)).fetchone()
+        row=db.execute('SELECT rowid,tool_name,payload,created_at FROM agent_runtime_events WHERE id=?',(observed['event_id'],)).fetchone()
         prior=db.execute('SELECT rowid FROM agent_runtime_events WHERE id=?',(refresh['source_event_id'],)).fetchone()
-        if not row or not prior or row['rowid']<=prior[0] or row['tool_name']!='playwright.browser_snapshot':return False
-        item=self._agent_decode(row['payload'],{}).get('transport_event',{}).get('item',{})
-        if item.get('arguments'):return False
-        for block in (item.get('result') or {}).get('content',[]):
-            text=block.get('text','') if isinstance(block,dict) else ''
-            if '### Snapshot' not in text:continue
-            snapshot=text.split('### Snapshot',1)[1]
-            if ('enter the 8-character code to confirm' in snapshot or re.search(
-                    r'thank you for applying|application (?:has been|was) (?:received|submitted)',snapshot,re.I)):
-                return False
-            button=re.search(r'(?m)^\s*- button "Submit application"([^\n]*)',snapshot)
-            return bool(button and '[disabled]' not in button.group(1))
-        return False
+        if (not row or not prior or row['rowid']<=prior[0] or row['tool_name']!='playwright.browser_snapshot'
+                or not 0<=time.time()-datetime.fromisoformat(row['created_at']).timestamp()<=120):return False
+        payload=self._agent_decode(row['payload'],{})
+        proof=payload.get('preverification_form_observation') or self._agent_preverification_form_observation(db,worker,payload)
+        return bool(proof and proof.get('full_snapshot') and proof.get('submit_enabled'))
 
     def _agent_authorize_email_continuation(self,db,worker,context,email_verification):
         from .ephemeral_auth import final_scope
