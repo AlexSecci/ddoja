@@ -375,3 +375,41 @@ def test_ranked_submission_batch_rejects_more_jobs_than_available(tmp_path):
     store,pipeline=ranked_batch_fixture(tmp_path)
     with pytest.raises(Conflict,match='Only 3'):
         store.configure_ranked_submission_batch(pipeline['id'],4)
+
+
+def test_closed_auth_gate_wakes_saved_waiter_without_resetting_application(tmp_path):
+    from test_efficiency_controls import cua
+    store,pipeline,_,_,_=seed(tmp_path,2)
+    for worker in evaluators(store,pipeline):
+        evaluate(store,worker,{'decision':'approve','reason':'Fixture'})
+    a,b=submissions(store,pipeline)
+    x=start(store,a);y=start(store,b);cua(store,a)
+    store.agent_action(a['id'],x['capability'],'browser_control',{'operation':'acquire_auth'})
+    store.agent_action(b['id'],y['capability'],'browser_control',{'operation':'acquire_auth'})
+    store.finish_agent_turn(b['id'],{'disposition':'waiting'})
+    before=store.get_agent_worker(b['id'])
+    with store.connect(write=True) as db:
+        db.execute("UPDATE agent_browser_controls SET state='closed' WHERE control_type='company_auth'")
+        store._agent_wake_orphaned_auth_waiters(db)
+    after=store.get_agent_worker(b['id'])
+    assert after['state']=='queued' and after['session_id']==before['session_id']
+    assert 'browser_wait_scope' not in after['context']
+    assert 'final_action_authorized_at' not in after['context']
+
+
+def test_closed_auth_gate_does_not_wake_worker_with_pending_human_action(tmp_path):
+    from test_efficiency_controls import cua
+    store,pipeline,_,_,_=seed(tmp_path,2)
+    for worker in evaluators(store,pipeline):
+        evaluate(store,worker,{'decision':'approve','reason':'Fixture'})
+    a,b=submissions(store,pipeline)
+    x=start(store,a);y=start(store,b);cua(store,a)
+    store.agent_action(a['id'],x['capability'],'browser_control',{'operation':'acquire_auth'})
+    store.agent_action(b['id'],y['capability'],'browser_control',{'operation':'acquire_auth'})
+    store.finish_agent_turn(b['id'],{'disposition':'waiting'})
+    with store.connect(write=True) as db:
+        w=db.execute('SELECT * FROM agent_workers WHERE id=?',(b['id'],)).fetchone()
+        store._agent_insert_inbox(db,w,'approval',action='fixture_review',summary='Human action needed',context={})
+        db.execute("UPDATE agent_browser_controls SET state='closed' WHERE control_type='company_auth'")
+        store._agent_wake_orphaned_auth_waiters(db)
+    assert store.get_agent_worker(b['id'])['state']=='waiting_approval'

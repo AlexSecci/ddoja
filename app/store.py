@@ -5994,6 +5994,21 @@ class Store:
                    "pipeline_id": worker["pipeline_id"], "authentication_verified": False}, actor="agent_scheduler")
 
     def _agent_wake_orphaned_auth_waiters(self, db):
+        # Auth can be released by the receipt/token broker as well as the
+        # browser-control tool. Reconcile waiters in either case; a closed mutex
+        # is not a new sign-in, browser permission, or final-action approval.
+        for waiter in db.execute("SELECT w.* FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id "
+                "JOIN agent_browser_controls c ON c.scope_key=json_extract(w.context,'$.browser_wait_scope') "
+                "WHERE w.state='waiting_browser' AND w.turn_active=0 AND p.stop_requested=0 "
+                "AND p.status NOT IN ('stopped','stopping','completed') "
+                "AND c.control_type='company_auth' AND c.state='closed'").fetchall():
+            if self._agent_pending_inbox_wait(db,waiter["id"]):
+                continue
+            context=self._agent_decode(waiter["context"],{});scope=context.pop("browser_wait_scope",None)
+            db.execute("UPDATE agent_workers SET state='queued',context=?,resume_mode=?,error='',updated_at=? WHERE id=?",
+                (json.dumps(context),"same_session" if waiter["session_id"] else "new_session",timestamp(),waiter["id"]))
+            self.event(db,"agent.closed_auth_waiter_requeued",{"pipeline_id":waiter["pipeline_id"],
+                "worker_id":waiter["id"],"scope":scope},waiter["job_id"],"agent_scheduler")
         for gate in db.execute("SELECT * FROM agent_browser_controls WHERE control_type='company_auth' AND state='open'").fetchall():
             if not self._agent_auth_owner_unavailable(db, gate):
                 continue
