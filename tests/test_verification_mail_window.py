@@ -40,6 +40,15 @@ def test_delayed_checkpoint_uses_exact_observed_challenge_window(tmp_path, monke
     assert verification_mail_window(s, w, j) == (598, 605)
 
 
+def test_redacted_submit_is_bound_to_current_host_final_action(tmp_path, monkeypatch):
+    s,w,j,event=setup_window(tmp_path,monkeypatch)
+    w['context']={'final_action_authorized_at':datetime.fromtimestamp(700,timezone.utc).isoformat()}
+    event(600,'browser_click','Submit application button')
+    event(602,proof={'present':True,'filled_boxes':0,'submit_enabled':False})
+    event(702,'browser_click',proof={'present':True,'filled_boxes':0,'submit_enabled':False})
+    assert verification_mail_window(s,w,j)==(700,705)
+
+
 @pytest.mark.parametrize('case', ['different_page', 'no_challenge', 'resend', 'second_submit', 'too_old', 'slow_transition'])
 def test_unproved_or_superseded_window_is_not_reused(tmp_path, monkeypatch, case):
     s, w, j, event = setup_window(tmp_path, monkeypatch)

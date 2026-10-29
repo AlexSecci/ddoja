@@ -63,6 +63,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "instruction_contract_id", "context_handoff_pending", "context_handoffs",
     "unexecuted_click_recovery", "verified_code_rejections",
     "email_challenge_recoveries",
+    "preverification_refresh",
 }
 
 AGENT_DISCOVERY_PROGRESS_FIELDS = {
@@ -2545,7 +2546,7 @@ class Store:
             if changed:self.event(db,'agent.security_code_recovery_queued',{'worker_id':worker_id,'source_event_id':evidence['event_id']},worker['job_id'],'scheduler')
         return bool(changed)
 
-    def recover_pending_email_verification(self, worker_id, provenance):
+    def recover_pending_email_verification(self, worker_id, provenance, refresh_challenge=False):
         """Continue a proved incomplete challenge without resetting any send flag."""
         from .trial_limits import read as read_trial, expired
         if not isinstance(provenance, str) or not provenance.strip():
@@ -2553,9 +2554,10 @@ class Store:
         with self.connect(write=True) as db:
             w = db.execute('SELECT w.*,p.stop_requested,p.status AS pipeline_status FROM agent_workers w '
                            'JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?', (worker_id,)).fetchone()
-            if (not w or w['role'] != 'submission' or w['state'] != 'interrupted' or w['turn_active'] or not w['session_id']
+            if (not w or w['role'] != 'submission' or w['state'] not in {'interrupted','waiting_browser','queued'}
+                    or w['turn_active'] or not w['session_id'] or not w['started_at']
                     or w['stop_requested'] or w['pipeline_status'] in {'stopped', 'stopping', 'completed'}):
-                raise Conflict('Only an inactive interrupted verification in a running campaign can recover.')
+                raise Conflict('Only an inactive existing verification in a running campaign can recover.')
             quota = db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()
             trial = read_trial(db, w['pipeline_id'])
             if (quota and self._agent_decode(quota[0], {}).get('paused') or trial and
@@ -2582,11 +2584,47 @@ class Store:
             if evidence['event_id'] in history:
                 raise Conflict('This observation already received one recovery turn.')
             history.append(evidence['event_id'])
+            if refresh_challenge:
+                first = db.execute("SELECT rowid FROM agent_runtime_events WHERE worker_id=? "
+                    "AND json_extract(payload,'$.verification_observation.present')=1 ORDER BY rowid LIMIT 1",
+                    (worker_id,)).fetchone()
+                mutation = db.execute("SELECT 1 FROM agent_runtime_events WHERE worker_id=? AND rowid>? "
+                    "AND success=1 AND tool_name LIKE 'playwright.%' AND tool_name NOT IN "
+                    "('playwright.browser_snapshot','playwright.browser_wait_for','playwright.browser_take_screenshot') LIMIT 1",
+                    (worker_id,first[0])).fetchone() if first else True
+                initial = db.execute("SELECT COUNT(*) FROM agent_runtime_events WHERE worker_id=? AND rowid<? "
+                    "AND success=1 AND tool_name='playwright.browser_click' AND created_at>=? "
+                    "AND lower(json_extract(payload,'$.transport_event.item.arguments.element')) LIKE '%submit%'",
+                    (worker_id,first[0],context.get('final_action_authorized_at') or timestamp())).fetchone()[0] if first else 0
+                if (not first or initial!=1 or mutation or context.get('preverification_refresh')
+                        or context.get('verified_code_rejections')):
+                    raise Conflict('Only an untouched initial challenge can receive one form refresh; later sends need reconciliation.')
+                context['preverification_refresh'] = {'source_event_id':evidence['event_id'],
+                    'prior_authorized_at':context.get('final_action_authorized_at'),
+                    'issued_at':timestamp(),'consumed':False,
+                    'reason':'The initial Submit stopped at an empty code challenge; no subsequent browser input occurred.'}
             context['operator_instructions'] = ('Continue this existing email-code challenge on the retained page. '
                 'Reobserve the exact job and checkpoint awaiting_email_token_handoff. The broker now matches the '
                 'recorded Submit/challenge window, even if the checkpoint was delayed. Do not reload, replay Submit, '
                 'or create a new application. Preserve all exact human approval requirements. If recovery fails, '
                 'ask one operational question and wait at that durable checkpoint.')
+            if refresh_challenge:
+                context['operator_instructions'] = ('The host verified that the initial Submit stopped at an EMPTY '
+                    'email-code challenge and that NO browser input followed it. Its possible-send flag remains '
+                    'preserved. One form refresh is reserved for this same application. Reopen its exact URL in '
+                    'the SAME owned tab, restore ordinary fields/uploads using existing ready documents and '
+                    'truthful saved answers, then take a FULL browser_snapshot with empty arguments and call '
+                    'begin_final_action. Do not regenerate documents. Only an enabled restored form with no '
+                    'verification challenge can consume this refresh. Checkpoint awaiting_email_token_handoff '
+                    'immediately after a fresh code is requested. Enter that matching code, observe the full '
+                    'challenge, and retain the exact human approval requirement before its final Submit. '
+                    'If any receipt appears, save it and stop; never repeat an ambiguous or verified final send.')
+                request_path=self.root/'data/auth-handoffs'/(worker_id+'.request.json')
+                if request_path.exists():
+                    request=json.loads(request_path.read_text());request['cancelled_at_unix']=time.time()
+                    temporary=request_path.with_suffix('.tmp');temporary.write_text(json.dumps(request));temporary.replace(request_path)
+                for suffix in ('.dpapi','.outcome.json'):
+                    (self.root/'data/auth-handoffs'/(worker_id+suffix)).unlink(missing_ok=True)
             db.execute("UPDATE agent_workers SET state='queued',context=?,error='',completed_at=NULL,"
                        "resume_mode='same_session',capability_sha256='',capability_expires_at=NULL,updated_at=? WHERE id=?",
                        (json.dumps(context), timestamp(), worker_id))
@@ -6849,17 +6887,15 @@ class Store:
             review_id = review["id"]
         context = current_context
         if context.get("final_action_may_have_been_sent") or self._context_may_have_sent_final(context, worker["checkpoint"]):
-            from .ephemeral_auth import final_scope
-            scope=final_scope(self.root,worker['id']) if email_verification else None
-            observation=self._agent_latest_cua_event(db,worker,success=True) if scope else None
-            verified=(observation or {}).get('verification') or {}
-            if not (scope and context.get('email_verification_final_scope')!=scope and verified.get('present')
-                    and verified.get('filled_boxes')==8 and verified.get('submit_enabled')):
-                if scope and not verified.get('present'):
-                    raise Conflict('The approved verification needs a FULL current browser_snapshot with empty arguments, no target/depth/filename, before begin_final_action. Do not retry Submit or request the same approval.')
-                raise Conflict("A final action may already have started; reconcile it instead of authorizing another click.")
-            context['email_verification_final_scope']=scope
-            self.event(db,'agent.email_verification_continuation_authorized',{'worker_id':worker['id'],'scope':scope,'browser_event_id':observation['event_id']},worker['job_id'],'agent_runtime')
+            refresh=context.get('preverification_refresh') or {}
+            if refresh and not refresh.get('consumed') and self._agent_restored_preverification_form(db,worker,refresh):
+                refresh['consumed']=True
+                refresh['consumed_at']=timestamp()
+                self.event(db,'agent.preverification_refresh_consumed',{'worker_id':worker['id'],
+                    'source_event_id':refresh['source_event_id'],'send_flag_preserved':True,
+                    'approval_granted':False},worker['job_id'],'agent_runtime')
+            else:
+                self._agent_authorize_email_continuation(db,worker,context,email_verification)
         context["final_action_may_have_been_sent"] = True
         context["final_action_authorized_at"] = timestamp()
         context["final_action_review_item_id"] = review_id
@@ -6874,6 +6910,40 @@ class Store:
                    worker["job_id"], "agent_safety_boundary")
         return {"authorized": True, "checkpoint": "final_action_in_flight", "review_item_id": review_id,
                 "jd_version": worker["jd_version"], "profile_version": worker["profile_version"]}
+
+    def _agent_restored_preverification_form(self,db,worker,refresh):
+        observed=self._agent_latest_cua_event(db,worker,success=True)
+        job=db.execute('SELECT url FROM jobs WHERE id=?',(worker['job_id'],)).fetchone()
+        if not observed or not job or observed.get('application_url')!=job[0] or (observed.get('verification') or {}).get('present'):
+            return False
+        row=db.execute('SELECT rowid,tool_name,payload FROM agent_runtime_events WHERE id=?',(observed['event_id'],)).fetchone()
+        prior=db.execute('SELECT rowid FROM agent_runtime_events WHERE id=?',(refresh['source_event_id'],)).fetchone()
+        if not row or not prior or row['rowid']<=prior[0] or row['tool_name']!='playwright.browser_snapshot':return False
+        item=self._agent_decode(row['payload'],{}).get('transport_event',{}).get('item',{})
+        if item.get('arguments'):return False
+        for block in (item.get('result') or {}).get('content',[]):
+            text=block.get('text','') if isinstance(block,dict) else ''
+            if '### Snapshot' not in text:continue
+            snapshot=text.split('### Snapshot',1)[1]
+            if ('enter the 8-character code to confirm' in snapshot or re.search(
+                    r'thank you for applying|application (?:has been|was) (?:received|submitted)',snapshot,re.I)):
+                return False
+            button=re.search(r'(?m)^\s*- button "Submit application"([^\n]*)',snapshot)
+            return bool(button and '[disabled]' not in button.group(1))
+        return False
+
+    def _agent_authorize_email_continuation(self,db,worker,context,email_verification):
+        from .ephemeral_auth import final_scope
+        scope=final_scope(self.root,worker['id']) if email_verification else None
+        observation=self._agent_latest_cua_event(db,worker,success=True) if scope else None
+        verified=(observation or {}).get('verification') or {}
+        if not (scope and context.get('email_verification_final_scope')!=scope and verified.get('present')
+                and verified.get('filled_boxes')==8 and verified.get('submit_enabled')):
+            if scope and not verified.get('present'):
+                raise Conflict('The approved verification needs a FULL current browser_snapshot with empty arguments, no target/depth/filename, before begin_final_action. Do not retry Submit or request the same approval.')
+            raise Conflict("A final action may already have started; reconcile it instead of authorizing another click.")
+        context['email_verification_final_scope']=scope
+        self.event(db,'agent.email_verification_continuation_authorized',{'worker_id':worker['id'],'scope':scope,'browser_event_id':observation['event_id']},worker['job_id'],'agent_runtime')
 
     def finish_agent_turn(self, worker_id, result):
         if not isinstance(result, dict):

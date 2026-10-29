@@ -42,6 +42,9 @@ def verification_mail_window(store, worker, job):
     """
     click = None
     window = None
+    context=worker.get('context') or {}
+    if isinstance(context,str):context=json.loads(context)
+    authorized_at=datetime.fromisoformat(context['final_action_authorized_at']).timestamp() if context.get('final_action_authorized_at') else None
     with store.connect() as db:
         rows = db.execute("SELECT tool_name,payload,created_at FROM agent_runtime_events "
             "WHERE worker_id=? AND success=1 AND tool_name IN "
@@ -53,6 +56,7 @@ def verification_mail_window(store, worker, job):
             args = item.get('arguments') or {}
             when = datetime.fromisoformat(row['created_at']).timestamp()
             url = value.get('observed_application_url') or store._agent_observed_application_url(db, worker, value)
+            proof = value.get('verification_observation') or {}
             if row['tool_name'] == 'playwright.browser_click':
                 label = str(args.get('element') or '').casefold()
                 if 'resend' in label or 'send a new code' in label:
@@ -60,7 +64,15 @@ def verification_mail_window(store, worker, job):
                 elif 'submit' in label:
                     window = None
                     click = when if url == job['url'] else None
-            proof = value.get('verification_observation') or {}
+                elif (not label and url==job['url'] and authorized_at is not None
+                        and 0<=when-authorized_at<=30 and proof.get('present')
+                        and proof.get('filled_boxes')==0 and proof.get('submit_enabled') is False):
+                    # Secret redaction removes click arguments after the page
+                    # starts showing a code. The host final-action timestamp
+                    # plus the returned empty challenge retains the transition.
+                    window=None;click=when
+                else:
+                    click=window=None
             if (click is not None and window is None and url == job['url']
                     and proof.get('present') and proof.get('filled_boxes') == 0
                     and proof.get('submit_enabled') is False and 0 <= when-click <= 20):
@@ -111,7 +123,8 @@ class AuthBroker:
                 while time.monotonic()<deadline:
                     # A changed task, nonce or auth owner cancels this lookup.
                     current=json.loads(request_path.read_text());live=self.store.get_agent_worker(worker_id)
-                    if current['request_id']!=request_id or live['state'] not in {'running','waiting_browser'}:return
+                    if (current['request_id']!=request_id or current.get('cancelled_at_unix')
+                            or live['state'] not in {'running','waiting_browser'}):return
                     with self.store.connect() as db:
                         gate=db.execute("SELECT worker_id FROM agent_browser_controls WHERE scope_key=? AND state='open'",('company:'+job['company_id'],)).fetchone()
                     if gate and gate[0]!=worker_id:return

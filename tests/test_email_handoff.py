@@ -67,7 +67,7 @@ def test_interrupted_empty_challenge_recovery_preserves_send_and_approval_scope(
                 'result': {'content': [{'type': 'text', 'text': text}]}}}})
     with s.connect(write=True) as db:
         db.execute("UPDATE pipelines SET status='running' WHERE id=?", (p['id'],))
-        db.execute('UPDATE agent_workers SET state=?,turn_active=0,context=? WHERE id=?',
+        db.execute("UPDATE agent_workers SET state=?,turn_active=0,started_at='2026-01-01',context=? WHERE id=?",
                    (blocked if blocked in {'uncertain', 'running'} else 'interrupted',
                     json.dumps({'final_action_may_have_been_sent': True}), wid))
         if blocked == 'stopped_pipeline': db.execute('UPDATE pipelines SET stop_requested=1 WHERE id=?', (p['id'],))
