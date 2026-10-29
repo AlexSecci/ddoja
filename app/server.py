@@ -42,6 +42,10 @@ class WorkerChoice(Strict):
     browser_backend: str = Field(max_length=30)
 
 
+class RankedSubmissionBatchInput(Strict):
+    count: int = Field(strict=True, ge=1, le=100)
+
+
 class StageDispatchInput(Strict):
     stage: Literal["discovery", "evaluation", "submission"]
     paused: bool = Field(strict=True)
@@ -768,6 +772,11 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     @app.post("/api/pipelines/{pipeline_id}/visibility")
     def pipeline_visibility(pipeline_id: str, body: PipelineVisibility):
         return {"pipeline": store.set_pipeline_visibility(pipeline_id, body.hidden)}
+
+    @app.post("/api/pipelines/{pipeline_id}/submission-batch")
+    def ranked_submission_batch(pipeline_id: str, value: RankedSubmissionBatchInput):
+        policy=store.configure_ranked_submission_batch(pipeline_id,value.count)
+        return {**app.state.agent_pipeline_manager.resume(pipeline_id),"submission_batch":policy}
 
     @app.post("/api/pipelines/{pipeline_id}/dispatch")
     def stage_dispatch(pipeline_id: str, value: StageDispatchInput):

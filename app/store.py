@@ -201,6 +201,58 @@ class Store:
                 self._agent_refresh_pipeline(db,pipeline_id)
             return {"pipeline_id":pipeline_id,"queued":queued,"count":len(queued)}
 
+    def configure_ranked_submission_batch(self, pipeline_id, count):
+        """Select an exact safe ranked batch through the host's admission path.
+
+        This authorizes no upload, binding action, CAPTCHA or final click. Those
+        continue through the existing worker tools and current human scopes.
+        """
+        if type(count) is not int or not 1 <= count <= 100:
+            raise ValueError("Choose between 1 and 100 applications.")
+        from .trial_limits import PREFIX
+        from .worker_settings import read_settings
+        from .fit_scoring import SCORING_VERSION
+        with self.connect(write=True) as db:
+            pipeline = db.execute("SELECT * FROM pipelines WHERE id=? AND mode='agentic'",(pipeline_id,)).fetchone()
+            if not pipeline or pipeline["status"] == "completed":
+                raise Conflict("A ranked submission batch requires an unfinished agentic campaign.")
+            if db.execute("SELECT 1 FROM agent_workers WHERE pipeline_id=? AND turn_active=1",(pipeline_id,)).fetchone():
+                raise Conflict("Let this campaign's active workers finish before selecting a new batch.")
+            quota=self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0],{})
+            if quota.get("paused"):
+                raise Conflict("Account quota is paused; this action cannot clear it.")
+            candidates=db.execute("SELECT pj.job_id,pj.fit_score,j.title,j.requisition_id FROM pipeline_jobs pj "
+                "JOIN jobs j ON j.id=pj.job_id WHERE pj.pipeline_id=? AND pj.selected=1 AND pj.manual_discard_reason='' "
+                "AND pj.agent_decision='approve' AND pj.fit_score>0 AND pj.fit_jd_version=j.jd_version "
+                "AND pj.fit_profile_version=? AND json_extract(pj.fit_payload,'$.scoring_version')=? "
+                "AND json_extract(pj.fit_payload,'$.eligibility')='eligible' "
+                "AND j.phase NOT IN ('submitted','discarded') AND j.run_status!='submission_uncertain' "
+                "AND pj.agent_status NOT IN ('submitted','discarded','uncertain') "
+                "AND NOT EXISTS(SELECT 1 FROM evidence e WHERE e.job_id=j.id AND e.kind='receipt') "
+                "AND NOT EXISTS(SELECT 1 FROM agent_submission_results r WHERE r.job_id=j.id AND r.state IN ('submitted','uncertain','discarded')) "
+                "AND NOT EXISTS(SELECT 1 FROM agent_inbox i WHERE i.job_id=j.id AND i.state='pending') "
+                "ORDER BY pj.fit_score DESC,pj.discovered_at,pj.job_id",(pipeline_id,self.profile_version(db),SCORING_VERSION)).fetchall()
+            chosen=[]
+            for candidate in candidates:
+                old=db.execute("SELECT state,context,checkpoint FROM agent_workers WHERE job_id=? AND role='submission'",(candidate["job_id"],)).fetchall()
+                if any(w["state"]!='superseded' or self._context_may_have_sent_final(self._agent_decode(w["context"],{}),w["checkpoint"]) for w in old):
+                    continue
+                chosen.append(dict(candidate))
+                if len(chosen)==count:
+                    break
+            if len(chosen)!=count:
+                raise Conflict(f"Only {len(chosen)} safe scored applications are available for this batch.")
+            execution=read_settings(self.root,db)["roles"]["submission"]
+            policy={"state":"active","pipeline_id":pipeline_id,"job_ids":[j["job_id"] for j in chosen],
+                "provider":execution["provider"],"model":execution["model"],"started_at":timestamp(),
+                "deadline_unix":None,"max_invocations":None,"max_discovery_invocations":0,
+                "execution_watermark":db.execute("SELECT COALESCE(MAX(rowid),0) FROM agent_execution_runs").fetchone()[0],
+                "allowed_roles":["submission","document"],"run_kind":"ranked_submission_batch","selected_jobs":chosen}
+            db.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(PREFIX+pipeline_id,json.dumps(policy)))
+            db.execute("UPDATE pipelines SET discovery_paused=1,evaluation_paused=1,submission_paused=0 WHERE id=?",(pipeline_id,))
+            self.event(db,"agent.ranked_submission_batch_configured",policy,actor="user")
+            return policy
+
     def set_stage_dispatch(self, pipeline_id, stage, paused):
         if stage not in {"discovery", "evaluation", "submission"} or type(paused) is not bool:
             raise ValueError("Choose discovery, evaluation or submission and a boolean pause state.")

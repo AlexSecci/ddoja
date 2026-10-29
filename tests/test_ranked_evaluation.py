@@ -328,3 +328,50 @@ def test_application_batch_finishes_when_closed_job_has_durable_discard(tmp_path
         db.execute("UPDATE pipeline_jobs SET agent_status='discarded' WHERE pipeline_id=?",(pipeline['id'],))
         policy={'pipeline_id':pipeline['id'],'job_ids':[worker['job_id']],'execution_watermark':0,'max_invocations':None,'deadline_unix':None,'allowed_roles':['submission','document']}
         assert 'terminal results' in stop_reason(db,policy)
+
+
+def ranked_batch_fixture(tmp_path):
+    store,pipeline,discovery,turn,_=seed(tmp_path,3)
+    for worker,score in zip(evaluators(store,pipeline),[40,95,75]):
+        evaluate(store,worker,scored(score))
+    store.agent_action(discovery['id'],turn['capability'],'finish_discovery',{'status':'complete','detail':'Fixture enumeration complete'})
+    store.finish_agent_turn(discovery['id'],{'disposition':'completed'})
+    return store,pipeline
+
+
+def test_ranked_submission_batch_selects_top_jobs_without_granting_actions(tmp_path):
+    store,pipeline=ranked_batch_fixture(tmp_path)
+    policy=store.configure_ranked_submission_batch(pipeline['id'],2)
+    assert [j['fit_score'] for j in policy['selected_jobs']]==[95,75]
+    assert policy['allowed_roles']==['submission','document']
+    view=store.get_pipeline(pipeline['id'])
+    assert view['discovery_paused'] and view['evaluation_paused'] and not view['submission_paused']
+    assert store.agent_inbox(pipeline['id'])==[]
+    assert len(store.prepare_ranked_submissions())==2
+    assert all('final_action_authorized_at' not in w['context'] for w in submissions(store,pipeline))
+
+
+def test_ranked_submission_batch_cannot_retry_possible_send(tmp_path):
+    store,pipeline=ranked_batch_fixture(tmp_path)
+    top=next(j for j in store.pipeline_jobs(pipeline['id'])['jobs'] if j['fit_score']==95)
+    with store.connect(write=True) as db:
+        wid=store._agent_insert_worker(db,pipeline['id'],'submission',job_id=top['id'],context={'final_action_may_have_been_sent':True})
+        db.execute("UPDATE agent_workers SET state='superseded' WHERE id=?",(wid,))
+    policy=store.configure_ranked_submission_batch(pipeline['id'],2)
+    assert [j['fit_score'] for j in policy['selected_jobs']]==[75,40]
+
+
+def test_ranked_submission_batch_does_not_clear_quota(tmp_path):
+    from app.store import Conflict
+    store,pipeline=ranked_batch_fixture(tmp_path)
+    store.set_agent_quota(True,reason='Fixture pause')
+    with pytest.raises(Conflict,match='quota'):
+        store.configure_ranked_submission_batch(pipeline['id'],2)
+    assert store.get_agent_quota()['paused']
+
+
+def test_ranked_submission_batch_rejects_more_jobs_than_available(tmp_path):
+    from app.store import Conflict
+    store,pipeline=ranked_batch_fixture(tmp_path)
+    with pytest.raises(Conflict,match='Only 3'):
+        store.configure_ranked_submission_batch(pipeline['id'],4)
