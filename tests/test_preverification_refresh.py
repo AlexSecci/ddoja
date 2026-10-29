@@ -77,6 +77,8 @@ def test_reserved_form_recovery_cannot_replay_a_consumed_or_possible_send(tmp_pa
     s,p,j,wid,observe,prefix,challenge=prepare(tmp_path,monkeypatch)
     s.recover_pending_email_verification(wid,'Scoped refresh',True)
     with s.connect(write=True) as db:db.execute("UPDATE agent_workers SET state='running',turn_active=1 WHERE id=?",(wid,))
+    observe(challenge)  # Reobserving the old empty challenge is not a new send.
+    observe(prefix,tool='browser_navigate',args={'url':j['url']})
     if blocked=='submit':observe(prefix,tool='browser_click',args={'element':'Submit application'})
     if blocked=='new_challenge':observe(challenge)
     observe(prefix+'- button "Submit application" [ref=submit]')

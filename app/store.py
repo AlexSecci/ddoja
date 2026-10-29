@@ -2655,11 +2655,14 @@ class Store:
                     or not self._agent_restored_preverification_form(db,w,refresh)):
                 raise Conflict('The current scope, form, admission or prior consumption prevents reserved recovery.')
             source=db.execute('SELECT rowid FROM agent_runtime_events WHERE id=?',(refresh['source_event_id'],)).fetchone()
+            navigation=db.execute("SELECT rowid FROM agent_runtime_events WHERE worker_id=? AND rowid>? AND success=1 "
+                "AND tool_name='playwright.browser_navigate' AND json_extract(payload,'$.transport_event.item.arguments.url')=? "
+                "ORDER BY rowid LIMIT 1",(worker_id,source[0],job['url'])).fetchone()
             possible_click=db.execute("SELECT 1 FROM agent_runtime_events WHERE worker_id=? AND rowid>? AND success=1 "
                 "AND tool_name='playwright.browser_click' AND (json_extract(payload,'$.transport_event.item.arguments.element') IS NULL "
                 "OR lower(json_extract(payload,'$.transport_event.item.arguments.element')) LIKE '%submit%') LIMIT 1",(worker_id,source[0])).fetchone()
             challenge=db.execute("SELECT 1 FROM agent_runtime_events WHERE worker_id=? AND rowid>? "
-                "AND json_extract(payload,'$.verification_observation.present')=1 LIMIT 1",(worker_id,source[0])).fetchone()
+                "AND json_extract(payload,'$.verification_observation.present')=1 LIMIT 1",(worker_id,navigation[0])).fetchone() if navigation else True
             if possible_click or challenge:raise Conflict('A subsequent possible send or code challenge requires reconciliation.')
             evidence=self._agent_latest_cua_event(db,w,success=True)
             refresh['restored_recovery']={'source_event_id':evidence['event_id'],'at':timestamp()}
