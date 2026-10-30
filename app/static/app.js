@@ -546,7 +546,7 @@ function renderWorker(worker, pipeline) {
   if (worker.job_title || worker.job_id) card.append(element('p', worker.job_title || ('Job ' + worker.job_id), 'sub'));
   if (worker.resume_mode) card.append(element('p', 'Resume mode: ' + humanize(worker.resume_mode), 'sub'));
   const execution = worker.context?.execution;
-  if (execution) card.append(element('p', `${execution.provider} · ${execution.model} · ${execution.effort} · ${execution.browser_backend}`, 'sub'));
+  if (execution) card.append(element('p', `${execution.provider} · ${execution.model} · ${execution.effort} · ${execution.browser_backend}${execution.service_tier ? ' · ' + (execution.service_tier === 'fast' ? 'Fast' : 'Standard') : ''}`, 'sub'));
   if (worker.context?.execution_change_deferred) card.append(element('p', 'Model change waits for reconciliation of the possibly sent application.', 'hint'));
   if (worker.updated_at) card.append(element('p', 'Updated ' + dateText(worker.updated_at), 'sub'));
   if (worker.id) card.append(element('p', 'Worker ID ' + worker.id, 'sub'));
@@ -1912,7 +1912,7 @@ function renderEfficiency() {
   else nodes.push(withRenderKey(element('p', 'Per-role usage is unavailable in this report.', 'sub'), 'roles-unavailable'));
   (report.by_execution || []).forEach((values, index) => {
     const choice = values.execution || {};
-    const label = choice.provider ? `${choice.provider} · ${choice.model} · ${choice.effort}` : 'Historical usage · execution choice not recorded';
+    const label = choice.provider ? `${choice.provider} · ${choice.model} · ${choice.effort}${choice.service_tier ? ' · ' + (choice.service_tier === 'fast' ? 'Fast' : 'Standard') : ' · speed not recorded'}` : 'Historical usage · execution choice not recorded';
     const card = withRenderKey(element('div', undefined, 'efficiency-role'), 'execution:' + index);
     card.append(element('strong', label), element('span', 'Turns ' + formatMetric(values.turns)
       + ' · Input ' + usageMetricText(values, 'input_tokens') + ' · Output ' + usageMetricText(values, 'output_tokens')));

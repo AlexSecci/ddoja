@@ -21,12 +21,21 @@ function renderWorkerSettings() {
     const legend = document.createElement('legend'); legend.textContent = workerSettings.role_labels[role]; section.append(legend);
     const grid = document.createElement('div'); grid.className = 'form-grid'; section.append(grid);
     const provider = settingsSelect('Provider', workerSettings.providers, value.provider); provider.select.name = 'provider'; grid.append(provider.field);
-    function dependentFields(modelId, effortId, backendId) {
+    function dependentFields(modelId, effortId, backendId, tierId) {
       while (grid.children.length > 1) grid.lastChild.remove();
       const p = workerSettings.providers.find(p => p.id === provider.select.value);
       const model = settingsSelect('Model', p.models, modelId); model.select.name = 'model'; grid.append(model.field);
       const effort = settingsSelect('Reasoning effort', p.models.find(m => m.id === model.select.value).efforts.map(id => ({ id })), effortId);
       effort.select.name = 'effort'; grid.append(effort.field);
+      const speed = settingsSelect('Speed', [], ''); speed.select.name = 'service_tier'; grid.append(speed.field);
+      function updateSpeed(value) {
+        const tiers = p.models.find(m => m.id === model.select.value).service_tiers || ['default'];
+        speed.select.replaceChildren();
+        tiers.forEach(id => { const o = document.createElement('option'); o.value = id; o.textContent = id === 'fast' ? 'Fast (higher subscription usage)' : 'Standard'; speed.select.append(o); });
+        speed.select.value = tiers.includes(value) ? value : 'default';
+        speed.select.disabled = tiers.length === 1;
+      }
+      updateSpeed(tierId || 'default');
       const backends = role === 'materials' ? ['none'] : p.browser_backends;
       const browser = settingsSelect('Browser', backends.map(id => ({ id, name: ({ none: 'No browser', cua: 'Chrome / native CUA', playwright: 'Playwright (separate profile)' })[id] })), backendId || p.default_browser_backend);
       browser.select.name = 'browser_backend'; grid.append(browser.field);
@@ -35,9 +44,10 @@ function renderWorkerSettings() {
         const previous = effort.select.value; effort.select.replaceChildren();
         levels.forEach(id => { const o = document.createElement('option'); o.value = id; o.textContent = id; effort.select.append(o); });
         effort.select.value = levels.includes(previous) ? previous : levels.includes('high') ? 'high' : levels[0];
+        updateSpeed(speed.select.value);
       });
     }
-    dependentFields(value.model, value.effort, value.browser_backend);
+    dependentFields(value.model, value.effort, value.browser_backend, value.service_tier);
     provider.select.addEventListener('change', () => dependentFields(null, 'high', null));
     container.append(section);
   });

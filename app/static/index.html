@@ -188,9 +188,10 @@
 
     <section id="settings" class="view hidden" aria-labelledby="settings-title">
       <div class="section-heading"><div><p class="eyebrow">Your execution choices</p><h2 id="settings-title">Worker settings</h2></div><button id="settings-reload" type="button" class="quiet-button">Reload saved settings</button></div>
-      <p class="intro">Choose a provider, model, reasoning effort and browser for each stage. Saved changes apply the next time a worker starts or resumes. Running workers finish their current invocation with their original settings.</p>
+      <p class="intro">Choose a provider, model, reasoning effort, speed and browser for each stage. Saved changes apply the next time a worker starts or resumes. Running workers finish their current invocation with their original settings.</p>
       <form id="worker-settings-form" class="panel worker-settings-panel">
         <div id="worker-settings-roles"><p class="hint">Loading saved settings…</p></div>
+        <p class="hint">Luna, Sol and GPT 6.1 Terra use your existing ChatGPT subscription. Fast mode uses included subscription limits at 2.5× the Standard rate where available. DeepSeek uses its separate API balance and Standard speed.</p>
         <p class="hint">Switching providers starts a new model session from the saved task checkpoint. A possibly sent application stays on its original runtime until it is reconciled. Saving settings does not restart campaigns or clear quota pauses.</p>
         <div class="form-footer"><p id="settings-status" role="status" class="hint"></p><button id="settings-save" type="submit" class="primary-button" disabled>Save worker settings</button></div>
       </form>

@@ -38,6 +38,8 @@ const server = http.createServer(async (req, res) => {
     await page.getByRole('button', { name: 'Save worker settings' }).waitFor();
     const evaluation = page.getByRole('group', { name: 'Evaluation', exact: true });
     await evaluation.getByLabel('Provider', { exact: true }).selectOption('deepseek');
+    assert.equal(await evaluation.getByLabel('Speed', { exact: true }).inputValue(), 'default');
+    assert.equal(await evaluation.getByLabel('Speed', { exact: true }).isDisabled(), true);
     assert.deepEqual(await evaluation.getByLabel('Reasoning effort').locator('option').evaluateAll(nodes => nodes.map(n => n.value)), ['low', 'high', 'max']);
     assert.equal(await evaluation.getByLabel('Browser', { exact: true }).inputValue(), 'playwright');
     await evaluation.getByLabel('Reasoning effort').selectOption('low');
@@ -51,9 +53,23 @@ const server = http.createServer(async (req, res) => {
     await page.getByText('Saved revision 1.', { exact: true }).waitFor();
     assert.equal(await evaluation.getByLabel('Provider', { exact: true }).inputValue(), 'deepseek');
     await evaluation.getByLabel('Provider', { exact: true }).selectOption('openai');
+    for (const model of ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-terra']) {
+      await evaluation.getByLabel('Model', { exact: true }).selectOption(model);
+      assert.equal(await evaluation.getByLabel('Speed', { exact: true }).isEnabled(), true);
+      await evaluation.getByLabel('Speed', { exact: true }).selectOption('fast');
+    }
+    await evaluation.getByLabel('Reasoning effort').selectOption('high');
     await page.getByRole('button', { name: 'Save worker settings' }).click();
     await page.getByText('Saved. New invocations use these choices;', { exact: false }).waitFor();
     assert.equal(saved.roles.evaluation.provider, 'openai');
+    assert.equal(saved.roles.evaluation.model, 'gpt-6.1-terra');
+    assert.equal(saved.roles.evaluation.service_tier, 'fast');
+    assert.equal(saved.roles.materials.service_tier, 'default');
+    await page.reload();
+    await page.locator('#settings').evaluate(node => node.classList.remove('hidden'));
+    await page.getByText('Saved revision 2.', { exact: true }).waitFor();
+    assert.equal(await evaluation.getByLabel('Model', { exact: true }).inputValue(), 'gpt-6.1-terra');
+    assert.equal(await evaluation.getByLabel('Speed', { exact: true }).inputValue(), 'fast');
     assert.equal(saves, 2); assert.deepEqual(errors, []);
     await page.screenshot({ path: process.argv[3], fullPage: true });
     console.log(JSON.stringify({ passed: true, saves, page_errors: errors.length }));

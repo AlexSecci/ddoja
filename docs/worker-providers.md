@@ -1,6 +1,12 @@
 # Worker providers and live settings
 
-Open **Settings** in the dashboard to choose the provider, model, reasoning effort and browser for discovery, evaluation, résumé/cover-letter writing, and submission independently. Press **Save worker settings** to persist them in the local database. Choices survive a dashboard restart.
+Open **Settings** in the dashboard to choose the provider, model, reasoning effort, speed and browser for discovery, evaluation, résumé/cover-letter writing, and submission independently. Press **Save worker settings** to persist them in the local database. Choices survive a dashboard restart.
+
+**GPT 6.1 Terra** (`gpt-6.1-terra`) uses the **Codex subscription** provider and the existing ChatGPT login, just like Sol and Luna. It requires no OpenAI API key and never falls back to API-key billing. Adding it does not change any saved model selections.
+
+The **Speed** selector offers **Standard** and **Fast** for supported subscription models, including Luna 6, GPT 6.1 Terra and Sol 6.1. Reasoning effort remains independent. Fast mode uses included subscription limits at **2.5×** the Standard rate where available; purchased credits have a different multiplier. See [OpenAI's speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed). Available speeds and efforts come from the local Codex model catalog, with documented fallback choices when no catalog is present. DeepSeek offers Standard speed only.
+
+Existing settings without a speed field read as Standard. Each CLI invocation explicitly sets `service_tier` and `features.fast_mode`; the document app-server also sets the tier for every turn, so a saved Fast session or global CLI preference cannot silently override a later Standard selection. Saved execution/usage records include the requested speed and efficiency totals separate the tiers. Historical usage without a recorded speed stays labeled as unknown. A speed-only change preserves the session and reusable evaluation results, and takes effect at the next invocation boundary.
 
 The default remains the existing subscription setup:
 

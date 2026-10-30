@@ -293,6 +293,11 @@ class CodexAgentRuntime:
                 "-c", f"model_reasoning_effort={_toml_string(effort)}",
                 "-c", 'web_search="disabled"', "-c", 'features.shell_tool=false',
                 "--output-schema", str(schema_path)]
+        # Pin both speeds explicitly: a user's global /fast preference or a
+        # resumed CLI session must not override this invocation's saved choice.
+        tier = choice.get("service_tier", "default")
+        args.extend(["-c", f"service_tier={_toml_string(tier)}",
+                     "-c", "features.fast_mode=" + ("true" if tier == "fast" else "false")])
         if provider == "openai":
             args.extend(["-c", 'forced_login_method="chatgpt"'])
         elif provider == "deepseek":

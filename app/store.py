@@ -3280,6 +3280,8 @@ class Store:
             model_config = dict(execution or read_settings(self.root, db)["roles"]["evaluation"])
             model_config.pop("settings_revision", None)
             model_config.pop("transport", None)
+            # Speed changes scheduling/usage, not the evaluation rubric or model.
+            model_config.pop("service_tier", None)
             if model_config.get("browser_backend") == "playwright":
                 prompt_hash = hashlib.sha256((prompt_hash + (self.root / "prompts/browser_playwright.md").read_text(encoding="utf-8")).encode()).hexdigest()
             if not isinstance(model_config, dict) or not isinstance(model_config.get("model"), str):
@@ -5039,7 +5041,7 @@ class Store:
             execution_groups = {}
             for row in rows:
                 execution = self._agent_decode(row["execution"], {})
-                identity = tuple(execution.get(k) for k in ("provider", "model", "effort", "browser_backend"))
+                identity = tuple(execution.get(k) for k in ("provider", "model", "effort", "browser_backend", "service_tier"))
                 execution_groups.setdefault(identity, []).append(row)
             result = {"pipeline_id": pipeline_id,
                       "totals": self._agent_usage_totals(rows),
@@ -5047,7 +5049,7 @@ class Store:
                                   for role in roles},
                       "cache": self._agent_cache_metrics(db, pipeline_id)}
             result['provider_requests'] = diagnostics(db, pipeline_id)
-            result["by_execution"] = [{"execution": dict(zip(("provider", "model", "effort", "browser_backend"), key)),
+            result["by_execution"] = [{"execution": dict(zip(("provider", "model", "effort", "browser_backend", "service_tier"), key)),
                                         **self._agent_usage_totals(group)} for key, group in execution_groups.items()]
             from .timing import summarize_timings
             timing_rows = db.execute("SELECT e.payload FROM agent_runtime_events e JOIN agent_workers w ON w.id=e.worker_id "

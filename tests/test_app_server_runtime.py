@@ -31,6 +31,7 @@ class ProtocolProcess:
         self.stdin = self
         self.returncode = None
         self.methods, self.replies, self.threads = [], [], 0
+        self.requests = []
         self.instances.append(self)
 
     def write(self, line):
@@ -38,6 +39,7 @@ class ProtocolProcess:
         method, params, identity = value.get("method"), value.get("params", {}), value.get("id")
         if method:
             self.methods.append(method)
+            self.requests.append((method, params))
         if method == "initialize":
             self.stdout.put({"id": identity, "result": {}})
         elif method == "thread/start":
@@ -145,5 +147,33 @@ def test_missing_registry_never_falls_back_or_replaces_a_saved_thread(tmp_path):
         browser = task("browser")
         browser["task"]["worker"]["role"] = "submission"
         assert host.run(browser, lambda _: None, lambda: False)["disposition"] == "failed"
+    finally:
+        host.close()
+
+
+def test_document_speeds_are_per_worker_and_loaded_sessions_can_switch_back(tmp_path):
+    host, _ = make_host(tmp_path)
+    def with_speed(worker, tier, session=None):
+        launch = task(worker, session)
+        launch["task"]["worker"]["context"] = {"execution": {"provider": "openai", "model": "gpt-6.1-terra",
+            "effort": "high", "service_tier": tier, "browser_backend": "none", "transport": "app_server"}}
+        return launch
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fast = pool.submit(host.run, with_speed("fast", "fast"), lambda _: None, lambda: False)
+            standard = pool.submit(host.run, with_speed("standard", "default"), lambda _: None, lambda: False)
+            a, b = fast.result(timeout=5), standard.result(timeout=5)
+        assert a["disposition"] == b["disposition"] == "completed"
+        before = len(host._process.requests)
+        result = host.run(with_speed("fast", "default", a["session_id"]), lambda _: None, lambda: False)
+        assert result["session_id"] == a["session_id"]
+        starts = [p for m, p in host._process.requests if m == "thread/start"]
+        assert {p["config"]["service_tier"] for p in starts} == {"default", "fast"}
+        assert all(p["config"]["features"]["fast_mode"] == (p["config"]["service_tier"] == "fast") for p in starts)
+        turns = [p for m, p in host._process.requests if m == "turn/start"]
+        assert {p["serviceTier"] for p in turns} == {"default", "fast"}
+        last = host._process.requests[before:]
+        assert not any(m.startswith("thread/") for m, _ in last)
+        assert next(p for m, p in last if m == "turn/start")["serviceTier"] == "default"
     finally:
         host.close()

@@ -191,13 +191,14 @@ class CodexAppServerRuntime:
                 process.terminate()
                 raise
 
-    def _config(self):
+    def _config(self, choice):
         settings = self.cli._read_cli_settings()
         servers = {name: {"enabled": False} for name in settings.get("mcp_servers", {})}
         servers["cua_repl"] = {"enabled": False, "command": sys.executable, "args": []}
         return {"model_provider": "openai", "forced_login_method": "chatgpt", "web_search": "disabled",
                 "mcp_servers": servers, "plugins": {name: {"enabled": False} for name in settings.get("plugins", {})},
-                "features": {"shell_tool": False}}
+                "service_tier": choice.get("service_tier", "default"),
+                "features": {"shell_tool": False, "fast_mode": choice.get("service_tier") == "fast"}}
 
     def run(self, launch, on_event, should_stop):
         from .timing import RunTiming
@@ -227,12 +228,12 @@ class CodexAppServerRuntime:
                 if thread_id not in self._loaded:
                     self._request("thread/resume", {"threadId": thread_id, "excludeTurns": True,
                                   "model": choice["model"], "cwd": str(self.root), "sandbox": "read-only",
-                                  "approvalPolicy": "never", "config": self._config()})
+                                  "approvalPolicy": "never", "config": self._config(choice)})
             else:
                 definitions = [{"type": "function", **{k: tool[k] for k in ("name", "description", "inputSchema")}}
                                for tool in bridge.tools()]
                 result = self._request("thread/start", {"model": choice["model"], "cwd": str(self.root),
-                    "sandbox": "read-only", "approvalPolicy": "never", "config": self._config(),
+                    "sandbox": "read-only", "approvalPolicy": "never", "config": self._config(choice),
                     "dynamicTools": [{"type": "namespace", "name": "agent_bridge",
                                       "description": "Scoped document task tools", "tools": definitions}]})
                 thread_id = result["thread"]["id"]
@@ -251,6 +252,7 @@ class CodexAppServerRuntime:
             on_event({"type": "thread.resumed" if worker.get("session_id") else "thread.started", "thread_id": session})
             binding["timing"].model_start()
             result = self._request("turn/start", {"threadId": thread_id, "model": choice["model"],
+                "serviceTier": choice.get("service_tier", "default"),
                 "effort": choice.get("effort", "high"), "outputSchema": FINAL_SCHEMA,
                 "input": [{"type": "text", "text": self.cli._prompt(task, worker)}]})
             turn_id = binding["turn_id"] = result["turn"]["id"]

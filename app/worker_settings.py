@@ -9,9 +9,12 @@ ROLE_KEYS = {"discovery": "discovery", "evaluator": "evaluation", "document": "m
 ROLE_LABELS = {"discovery": "Discovery", "evaluation": "Evaluation", "materials": "Résumé and cover letter", "submission": "Submission"}
 SETTINGS_KEY = "worker_runtime_settings_v1"
 OPENAI_MODELS = {
-    "gpt-6-luna": "Luna 6", "gpt-6.1-sol": "Sol 6.1", "gpt-6.1-terra": "Terra 6.1",
+    "gpt-6-luna": "Luna 6", "gpt-6.1-sol": "Sol 6.1", "gpt-6.1-terra": "GPT 6.1 Terra",
     "gpt-6-astra": "Astra 6", "gpt-6-sol": "Sol 6", "gpt-5.6-sol": "Sol 5.6", "gpt-5.6-luna": "Luna 5.6",
 }
+# Documented subscription Fast models, used only when the local catalog is absent.
+OPENAI_FAST_MODELS = {"gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol"}
+EXECUTION_FIELDS = ("provider", "model", "effort", "browser_backend", "service_tier")
 
 
 class SettingsConflict(ValueError):
@@ -34,12 +37,17 @@ def model_catalog(root):
         efforts = [v["effort"] for v in data.get("supported_reasoning_levels", []) if isinstance(v, dict) and v.get("effort")]
         if not efforts:
             efforts = ["low", "medium", "high", "xhigh", "max"] + ([] if "luna" in slug else ["ultra"])
-        models.append({"id": slug, "name": label, "efforts": efforts})
+        tiers = data.get("service_tiers", [])
+        fast = (any(isinstance(t, dict) and t.get("id") in {"fast", "priority"} for t in tiers)
+                or "fast" in data.get("additional_speed_tiers", [])) if data else slug in OPENAI_FAST_MODELS
+        models.append({"id": slug, "name": label, "efforts": efforts,
+                       "service_tiers": ["default", "fast"] if fast else ["default"]})
     return [
         {"id": "openai", "name": "Codex subscription", "authentication": "chatgpt", "models": models,
          "browser_backends": ["cua", "playwright"], "default_browser_backend": "cua"},
         {"id": "deepseek", "name": "DeepSeek API", "authentication": "api_key", "models": [
-            {"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash 1017 (current alias)", "efforts": ["low", "high", "max"]}],
+            {"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash 1017 (current alias)", "efforts": ["low", "high", "max"],
+             "service_tiers": ["default"]}],
          "browser_backends": ["playwright"], "default_browser_backend": "playwright"},
     ]
 
@@ -57,13 +65,18 @@ def defaults(root):
         if key == "materials":
             value = config.get("models", {}).get("document", value)
         roles[key] = {"provider": "openai", "model": value.get("model", model), "effort": value.get("effort", effort),
-                      "browser_backend": "none" if key == "materials" else "cua"}
+                      "browser_backend": "none" if key == "materials" else "cua", "service_tier": "default"}
     return {"revision": 0, "roles": roles}
 
 
 def read_settings(root, db):
     row = db.execute("SELECT value FROM meta WHERE key=?", (SETTINGS_KEY,)).fetchone()
-    return json.loads(row[0]) if row else defaults(root)
+    saved = json.loads(row[0]) if row else defaults(root)
+    # Existing saved preferences predate the speed selector. Do not change their
+    # revision or write to the database just to display the new standard default.
+    for choice in saved["roles"].values():
+        choice.setdefault("service_tier", "default")
+    return saved
 
 
 def validate_roles(root, roles):
@@ -72,7 +85,7 @@ def validate_roles(root, roles):
     providers = {p["id"]: p for p in model_catalog(root)}
     result = {}
     for role, choice in roles.items():
-        if not isinstance(choice, dict) or set(choice) - {"provider", "model", "effort", "browser_backend"}:
+        if not isinstance(choice, dict) or set(choice) - set(EXECUTION_FIELDS):
             raise ValueError("Worker settings contain unsupported fields.")
         provider = providers.get(choice.get("provider"))
         if provider is None:
@@ -80,10 +93,14 @@ def validate_roles(root, roles):
         model = next((m for m in provider["models"] if m["id"] == choice.get("model")), None)
         if model is None or choice.get("effort") not in model["efforts"]:
             raise ValueError("Choose a supported model and reasoning effort.")
+        tier = choice.get("service_tier", "default")
+        if tier not in model["service_tiers"]:
+            raise ValueError("Choose a supported speed for this model and provider.")
         backend = choice.get("browser_backend", "none" if role == "materials" else provider["default_browser_backend"])
         if backend not in (["none"] if role == "materials" else provider["browser_backends"]):
             raise ValueError("The browser runtime is not supported for this provider and worker type.")
-        result[role] = {"provider": provider["id"], "model": model["id"], "effort": choice["effort"], "browser_backend": backend}
+        result[role] = {"provider": provider["id"], "model": model["id"], "effort": choice["effort"],
+                        "browser_backend": backend, "service_tier": tier}
     return result
 
 
@@ -122,7 +139,7 @@ def pin_execution(root, db, worker, *, may_have_sent=False, now):
     if not old and (worker["session_id"] or may_have_sent):
         old = {**defaults(root)["roles"][ROLE_KEYS[worker["role"]]],
                "transport": "app_server" if str(worker["session_id"]).startswith("app_server:") else "exec", "settings_revision": 0}
-    if may_have_sent and old and any(choice[k] != old.get(k) for k in ("provider", "model", "effort", "browser_backend")):
+    if may_have_sent and old and any(choice[k] != old.get(k, "default" if k == "service_tier" else None) for k in EXECUTION_FIELDS):
         context["execution_change_deferred"] = {"requested": choice, "reason": "Reconcile the possibly sent application on its original runtime first."}
         choice = old
     else:

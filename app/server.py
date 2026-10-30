@@ -40,6 +40,7 @@ class WorkerChoice(Strict):
     model: str = Field(max_length=100)
     effort: str = Field(max_length=20)
     browser_backend: str = Field(max_length=30)
+    service_tier: Literal["default", "fast"] = "default"
 
 
 class RankedSubmissionBatchInput(Strict):
