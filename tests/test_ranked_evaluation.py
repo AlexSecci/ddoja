@@ -245,6 +245,26 @@ def test_dispatch_continues_from_saved_scored_backlog_after_dashboard_restart(tm
     assert [w["context"]["fit_score"] for w in parents if w["role"] == "submission"] == [97, 71]
 
 
+def test_auth_owner_continuation_precedes_higher_scores_without_bypassing_quota(tmp_path):
+    store, pipeline, _, _, _ = seed(tmp_path, 3)
+    for worker, score in zip(evaluators(store, pipeline), [80, 95, 20]):
+        evaluate(store, worker, scored(score))
+    store.prepare_ranked_submissions()
+    parents = submissions(store, pipeline)
+    owner = next(w for w in parents if w['context']['fit_score'] == 20)
+    with store.connect(write=True) as db:
+        # All jobs have already started; score order must not keep filling the
+        # slots with waiters ahead of the owner that releases their shared lock.
+        db.execute("UPDATE agent_workers SET started_at='2026-01-01' WHERE pipeline_id=? AND role='submission'", (pipeline['id'],))
+        store._agent_set_browser_control(db, 'company:' + pipeline['company_id'], 'company_auth', 'open',
+                                        'Synthetic existing auth continuation', 'Fixture', owner['id'], [])
+    queue = [store.get_agent_worker(i) for i in store.list_queued_agent_workers()]
+    assert [w['context']['fit_score'] for w in queue if w['role'] == 'submission'] == [20, 95, 80]
+    store.set_agent_quota(True, reason='Synthetic quota hold')
+    assert not store.reserve_agent_worker(owner['id'])
+    assert not store.get_agent_worker(owner['id'])['context'].get('final_action_authorized_at')
+
+
 def test_unblocked_zero_is_not_an_application_candidate(tmp_path):
     store, pipeline, _, _, _ = seed(tmp_path, 1)
     result = evaluate(store, evaluators(store, pipeline)[0], scored(0))

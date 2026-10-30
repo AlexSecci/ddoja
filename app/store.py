@@ -7405,6 +7405,8 @@ class Store:
                               "WHERE w.state='queued' AND p.mode='agentic' AND p.stop_requested=0 "
                               "AND p.status NOT IN ('stopped','completed','stopping') "
                               "ORDER BY CASE w.role WHEN 'document' THEN 0 WHEN 'submission' THEN 1 WHEN 'evaluator' THEN 2 ELSE 3 END,"
+                              "CASE WHEN w.role='submission' AND EXISTS(SELECT 1 FROM agent_browser_controls c "
+                              "WHERE c.control_type='company_auth' AND c.state='open' AND c.worker_id=w.id) THEN 0 ELSE 1 END,"
                               "CASE WHEN w.role='submission' AND w.started_at IS NOT NULL THEN 0 ELSE 1 END,"
                               "CASE WHEN w.role='submission' AND pj.fit_jd_version=j.jd_version "
                               "AND pj.fit_profile_version=? THEN pj.fit_score END DESC,"
