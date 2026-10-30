@@ -6343,7 +6343,7 @@ class Store:
     def _agent_auth_owner_unavailable(db, control):
         owner = db.execute("SELECT state,turn_active FROM agent_workers WHERE id=?", (control["worker_id"],)).fetchone()
         return not owner or (not owner["turn_active"] and owner["state"] in {
-            "failed", "completed", "discarded", "stopped", "superseded", "session_missing", "uncertain"})
+            "failed", "completed", "discarded", "stopped", "interrupted", "superseded", "session_missing", "uncertain"})
 
     def _agent_transfer_auth_owner(self, db, control, worker):
         """Transfer only the mutex: authentication remains unverified and open."""
@@ -6380,6 +6380,8 @@ class Store:
                                     "AND p.status NOT IN ('stopped','stopping','completed') ORDER BY w.created_at,w.id").fetchall():
                 context = self._agent_decode(waiter["context"], {})
                 if context.get("browser_wait_scope") != gate["scope_key"]:
+                    continue
+                if self._agent_pending_inbox_wait(db, waiter["id"]):
                     continue
                 db.execute("UPDATE agent_workers SET state='queued',resume_mode=?,updated_at=? WHERE id=?",
                            ("same_session" if waiter["session_id"] else "new_session", timestamp(), waiter["id"]))

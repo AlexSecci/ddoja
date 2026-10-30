@@ -747,6 +747,7 @@ class CodexAgentRuntime:
                 "turn_completed": bool(turn_completed),
                 "verified_receipt_id": result.get("verified_receipt_id"),
                 "post_receipt_transport_issue": result.get("post_receipt_transport_issue"),
+                "persistence_error_type": result.get("persistence_error_type"),
                 "elapsed_seconds": round(time.monotonic() - invocation_started, 2),
                 "stderr_diagnostic": stderr_diagnostic,
             }
@@ -863,6 +864,7 @@ class CodexAgentRuntime:
         stream_eof = {"stdout": False, "stderr": False}
         stop_sent_at: float | None = None
         callback_failure: str | None = None
+        callback_failure_type: str | None = None
         tool_violation: str | None = None
         callback_count = 0
         turn_completed = False
@@ -933,6 +935,7 @@ class CodexAgentRuntime:
                               "session_id": last_session, **detail})
                 except Exception as error:
                     callback_failure = str(error)
+                    callback_failure_type = type(error).__name__
                 if stop_sent_at is None:
                     stop_sent_at = time.monotonic()
                     self._interrupt(process)
@@ -955,6 +958,7 @@ class CodexAgentRuntime:
                     on_event(usage_event)
             except Exception as error:
                 callback_failure = str(error)
+                callback_failure_type = type(error).__name__
                 if stop_sent_at is None:
                     stop_sent_at = time.monotonic()
                     self._interrupt(process)
@@ -970,7 +974,8 @@ class CodexAgentRuntime:
                 "stderr_diagnostic": self._stderr_diagnostic(list(stderr_tail))}
 
         if callback_failure:
-            return finish({**base, "disposition": "failed", "error": "Could not durably record a Codex transport event."},
+            return finish({**base, "disposition": "failed", "error": "Could not durably record a Codex transport event.",
+                           "persistence_error_type": callback_failure_type},
                           event_count=callback_count, returncode=returncode,
                           stderr_diagnostic=base["stderr_diagnostic"], turn_completed=turn_completed)
         if provider_error and _is_quota_error(provider_error):

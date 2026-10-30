@@ -384,6 +384,10 @@ def test_runtime_callback_persistence_failure_is_not_hidden_as_stop(tmp_path, mo
     result = runtime.run(_task(), lambda _event: (_ for _ in ()).throw(RuntimeError("database down")), lambda: False)
     assert result["disposition"] == "failed"
     assert "durably record" in result["error"]
+    assert result['persistence_error_type'] == 'RuntimeError'
+    report = json.loads(Path(result['diagnostic_report_path']).read_text())
+    assert report['persistence_error_type'] == 'RuntimeError'
+    assert 'database down' not in json.dumps(report)
 
 
 def test_runtime_missing_saved_session_is_explicit_nonterminal(tmp_path, monkeypatch):

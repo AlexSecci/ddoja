@@ -129,6 +129,42 @@ def _wait_for(predicate, *, timeout=10):
     raise AssertionError("Timed out waiting for the fixture manager state transition.")
 
 
+def test_dispatch_failure_after_durable_event_does_not_abort_current_task(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    pipeline = store.create_agent_pipeline('Synthetic dispatch', 'https://fictional.invalid/careers')
+    worker = store.list_agent_workers(pipeline['id'])[0]
+    assert store.reserve_agent_worker(worker['id'])
+
+    class Runtime:
+        def run(self, launch, on_event, should_stop):
+            on_event({'type': 'thread.started', 'thread_id': 'saved-current-session'})
+            item = store.agent_action(worker['id'], launch['capability'], 'ask_question', {
+                'question': 'Synthetic required applicant fact?'})
+            on_event({'type': 'tool_result', 'tool_name': 'agent_bridge.ask_question', 'success': True,
+                      'session_id': 'saved-current-session'})
+            return {'disposition': 'waiting', 'session_id': 'saved-current-session',
+                    'checkpoint': 'inbox:' + item['inbox_item_id']}
+
+    manager = AgentPipelineManager(store, runtime_factory=lambda _: Runtime())
+    def failed_dispatch():
+        raise RuntimeError('Synthetic independent scheduling failure')
+    monkeypatch.setattr(manager, 'schedule', failed_dispatch)
+    try:
+        result = manager._run_worker(worker['id'])
+        assert result['disposition'] == 'waiting'
+        saved = store.get_agent_worker(worker['id'])
+        assert saved['state'] == 'waiting_question'
+        assert saved['session_id'] == 'saved-current-session'
+        assert saved['error'] == ''
+        with store.connect() as db:
+            assert db.execute('SELECT COUNT(*) FROM agent_runtime_events WHERE worker_id=?', (worker['id'],)).fetchone()[0] == 2
+            attention = db.execute("SELECT payload FROM events WHERE kind='agent.runtime_schedule_attention'").fetchall()
+            assert len(attention) == 2
+            assert all(json.loads(row[0])['event_persisted'] for row in attention)
+    finally:
+        manager.shutdown()
+
+
 @pytest.mark.parametrize(("existing_status", "expected_status"), [
     (None, "pending"),
     ("unknown", "unknown"),

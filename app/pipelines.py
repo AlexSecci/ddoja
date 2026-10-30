@@ -579,7 +579,19 @@ class AgentPipelineManager:
             # MCP tool results are emitted after the scoped Store action. In
             # particular, a discovery listing may have inserted its evaluator;
             # dispatch it now instead of waiting for discovery to finish.
-            self.schedule()
+            try:
+                self.schedule()
+            except Exception as error:
+                # The event above is already durable. A separate dispatch
+                # failure must not interrupt a browser action and turn it into
+                # an uncertain send. Later events/completions retry scheduling.
+                try:
+                    with self.store.connect(write=True) as db:
+                        self.store.event(db, "agent.runtime_schedule_attention", {
+                            "worker_id": worker_id, "pipeline_id": pipeline_id,
+                            "error_type": type(error).__name__, "event_persisted": True}, actor="agent_scheduler")
+                except Exception:
+                    pass
 
         try:
             task = self.store.agent_launch_context(worker_id)

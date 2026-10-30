@@ -132,6 +132,35 @@ def test_shared_connector_circuit_blocks_other_browser_work_and_requires_current
     assert store.reserve_agent_worker(other_d["id"])
 
 
+@pytest.mark.parametrize('owner_state', ['interrupted', 'active', 'waiting_question'])
+def test_interrupted_auth_owner_releases_mutex_without_stealing_live_or_human_wait(tmp_path, owner_state):
+    store, pipeline, _, _, _ = seed(tmp_path, 2)
+    owner, waiter = [w for w in store.list_agent_workers(pipeline['id']) if w['role'] == 'evaluator']
+    a, b = start(store, owner), start(store, waiter)
+    cua(store, owner)
+    store.agent_action(owner['id'], a['capability'], 'browser_control', {'operation': 'acquire_auth'})
+    store.agent_action(waiter['id'], b['capability'], 'browser_control', {'operation': 'acquire_auth'})
+    store.finish_agent_turn(waiter['id'], {'disposition': 'waiting'})
+    before = store.get_agent_worker(waiter['id'])
+    if owner_state == 'waiting_question':
+        store.agent_action(owner['id'], a['capability'], 'ask_question', {'question': 'Synthetic missing applicant fact?'})
+        store.finish_agent_turn(owner['id'], {'disposition': 'waiting'})
+    elif owner_state == 'interrupted':
+        # This is the actual failure pattern: an owner returns waiting without
+        # recording a durable wait, and finish_agent_turn marks it interrupted.
+        store.finish_agent_turn(owner['id'], {'disposition': 'waiting'})
+    with store.connect(write=True) as db:
+        store._agent_wake_orphaned_auth_waiters(db)
+        gate = db.execute("SELECT * FROM agent_browser_controls WHERE scope_key=?", ('company:' + pipeline['company_id'],)).fetchone()
+        assert gate['state'] == 'open'  # A transfer never proves authentication.
+        assert gate['worker_id'] == (waiter['id'] if owner_state == 'interrupted' else owner['id'])
+    after = store.get_agent_worker(waiter['id'])
+    assert after['state'] == ('queued' if owner_state == 'interrupted' else 'waiting_browser')
+    assert after['session_id'] == before['session_id']
+    assert not after['context'].get('final_action_may_have_been_sent')
+    assert not after['context'].get('final_action_authorized_at')
+
+
 def test_usage_deltas_are_idempotent_and_do_not_treat_unreported_caching_as_zero(tmp_path):
     store, pipeline, d, _, _ = seed(tmp_path, 0)
     base = {"session_id": "s", "turn_id": "1", "counter_kind": "cumulative", "counters": {
