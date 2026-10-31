@@ -100,6 +100,48 @@ class AuthBroker:
         self.pool.submit(self._service,worker_id,request_id)
         return {'status':'servicing'}
 
+    def _current(self, worker_id, request_id):
+        """Revalidate the same read-only lookup before each network attempt."""
+        request=json.loads((self.store.root/'data/auth-handoffs'/(worker_id+'.request.json')).read_text())
+        worker=self.store.get_agent_worker(worker_id)
+        pipeline=self.store.get_pipeline(worker['pipeline_id'])
+        if (request.get('request_id')!=request_id or request.get('cancelled_at_unix')
+                or request.get('delivered_at_unix') or pipeline['stop_requested']
+                or worker['state'] not in {'running','waiting_browser'}):
+            return False
+        from .ephemeral_auth import authorization
+        grant=authorization(self.store.root,worker_id)
+        if not grant or grant['scope_token']!=request.get('scope_token'):return False
+        job=self.store.get_job(worker['job_id'])
+        with self.store.connect() as db:
+            gate=db.execute("SELECT worker_id FROM agent_browser_controls WHERE scope_key=? AND state='open'",
+                            ('company:'+job['company_id'],)).fetchone()
+        return not gate or gate[0]==worker_id
+
+    def _request(self, client, method, url, *, worker_id, request_id, stage, deadline, **kwargs):
+        # Only Google OAuth refresh and scoped Gmail reads use this helper.
+        # It never retries an employer action or changes the mail search scope.
+        for attempt in range(1,4):
+            if not self._current(worker_id,request_id):return None
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise httpx.ReadTimeout('Scoped Gmail transport retry budget exhausted.')
+            try:
+                response=getattr(client,method)(url,timeout=httpx.Timeout(min(15,remaining),connect=min(5,remaining)),**kwargs)
+                response.raise_for_status()
+                # The task may have been stopped or replaced while Google replied.
+                if not self._current(worker_id,request_id):return None
+                return response
+            except (httpx.TransportError,httpx.HTTPStatusError) as error:
+                status=error.response.status_code if isinstance(error,httpx.HTTPStatusError) else None
+                if (status is not None and status not in {408,429,500,502,503,504}) or attempt==3:
+                    raise
+                if not self._current(worker_id,request_id):return None
+                with self.store.connect(write=True) as db:
+                    self.store.event(db,'agent.auth_broker_transport_retry',{
+                        'worker_id':worker_id,'request_id':request_id,'stage':stage,
+                        'attempt':attempt,'error_type':type(error).__name__,'http_status':status},actor='auth_broker')
+                time.sleep(min(.5*2**(attempt-1),max(0,deadline-time.monotonic())))
+
     def _service(self,worker_id,request_id):
         try:
             from .ephemeral_auth import authorization
@@ -111,8 +153,11 @@ class AuthBroker:
             if urlsplit(job['url']).hostname!='job-boards.greenhouse.io':return
             credentials=json.loads(_dpapi(self.credential_path.read_bytes(),decrypt=True))
             with httpx.Client(timeout=15,trust_env=False) as client:
-                response=client.post('https://oauth2.googleapis.com/token',data={**{k:credentials[k] for k in ('client_id','client_secret','refresh_token')},'grant_type':'refresh_token'})
-                response.raise_for_status();headers={'Authorization':'Bearer '+response.json()['access_token']}
+                response=self._request(client,'post','https://oauth2.googleapis.com/token',worker_id=worker_id,request_id=request_id,
+                    stage='oauth_refresh',deadline=time.monotonic()+20,
+                    data={**{k:credentials[k] for k in ('client_id','client_secret','refresh_token')},'grant_type':'refresh_token'})
+                if response is None:return
+                headers={'Authorization':'Bearer '+response.json()['access_token']}
                 window=verification_mail_window(self.store,worker,job)
                 after,before=window or (int(request['requested_at_unix'])-30,None)
                 query='from:no-reply@us.greenhouse-mail.io subject:"Security code for your application" after:'+str(after)
@@ -128,13 +173,18 @@ class AuthBroker:
                     with self.store.connect() as db:
                         gate=db.execute("SELECT worker_id FROM agent_browser_controls WHERE scope_key=? AND state='open'",('company:'+job['company_id'],)).fetchone()
                     if gate and gate[0]!=worker_id:return
-                    listing=client.get('https://gmail.googleapis.com/gmail/v1/users/me/messages',params={'q':query,'maxResults':3},headers=headers);listing.raise_for_status()
+                    listing=self._request(client,'get','https://gmail.googleapis.com/gmail/v1/users/me/messages',worker_id=worker_id,
+                        request_id=request_id,stage='message_search',deadline=deadline,params={'q':query,'maxResults':3},headers=headers)
+                    if listing is None:return
                     candidates=listing.json().get('messages',[])
                     if len(candidates)>1:
                         from .auth_handoffs import outcome
                         outcome(self.store,worker_id,request_id,'ambiguous_mail');self.on_ready();return
                     if candidates:
-                        message=client.get('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+candidates[0]['id'],params={'format':'full'},headers=headers);message.raise_for_status();mail=message.json()
+                        message=self._request(client,'get','https://gmail.googleapis.com/gmail/v1/users/me/messages/'+candidates[0]['id'],
+                            worker_id=worker_id,request_id=request_id,stage='message_read',deadline=deadline,params={'format':'full'},headers=headers)
+                        if message is None:return
+                        mail=message.json()
                         fields={h['name'].lower():h['value'] for h in mail['payload'].get('headers',[])}
                         recipients={address.lower() for _,address in getaddresses([fields.get('to','')])}
                         if (credentials['email'].lower() not in recipients
