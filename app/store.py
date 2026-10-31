@@ -4101,6 +4101,33 @@ class Store:
         return {"state": "queued", "resume_mode": "same_session",
                 "reason": "durable_progress"}
 
+    def _agent_refresh_evaluator_snapshot(self, db, worker, source):
+        """Bind a fresh evaluation read, never a submission or document approval."""
+        if worker['role'] != 'evaluator' or worker['state'] != 'running':
+            return worker, False
+        job = db.execute('SELECT jd_version FROM jobs WHERE id=?', (worker['job_id'],)).fetchone()
+        if not job:
+            raise KeyError(worker['job_id'])
+        current = {'jd_version': job['jd_version'], 'profile_version': self.profile_version(db)}
+        previous = {key: worker[key] for key in current}
+        if previous == current:
+            return worker, False
+        context = self._agent_decode(worker['context'], {})
+        refresh = {'previous_snapshot': previous, 'current_snapshot': current,
+                   'refreshed_at': timestamp(), 'source': source,
+                   'instruction': 'Reassess against the current job and applicant evidence supplied in this response. '
+                                  'Prior checkpoint assessments are historical notes, not a committed current score.'}
+        history = context.get('evaluation_snapshot_history', [])
+        context['evaluation_snapshot_history'] = [*history[-7:], refresh]
+        context['evaluation_snapshot_refresh'] = refresh
+        db.execute('UPDATE agent_workers SET jd_version=?,profile_version=?,context=?,updated_at=? WHERE id=?',
+                   (current['jd_version'], current['profile_version'], json.dumps(context, ensure_ascii=False),
+                    refresh['refreshed_at'], worker['id']))
+        self.event(db, 'agent.evaluation_snapshot_refreshed',
+                   {'pipeline_id': worker['pipeline_id'], 'worker_id': worker['id'], **refresh},
+                   worker['job_id'], 'agent_scheduler')
+        return db.execute('SELECT * FROM agent_workers WHERE id=?', (worker['id'],)).fetchone(), True
+
     def agent_launch_context(self, worker_id):
         token = uuid.uuid4().hex + uuid.uuid4().hex
         expiry = time.time() + 3600
@@ -4112,6 +4139,7 @@ class Store:
                                   "JOIN companies c ON c.id=p.company_id WHERE p.id=?", (worker["pipeline_id"],)).fetchone()
             if not pipeline or pipeline["mode"] != "agentic" or pipeline["stop_requested"] or worker["state"] != "running":
                 raise Conflict("This agent worker is not in a launchable running state.")
+            worker, snapshot_refreshed = self._agent_refresh_evaluator_snapshot(db, worker, 'launch_context')
             worker_record = dict(worker)
             if worker["role"] == "discovery":
                 worker_context = self._agent_decode(worker["context"], {})
@@ -4156,7 +4184,7 @@ class Store:
                                 and (not current_job or worker["jd_version"] == current_job["jd_version"]))
             same_saved_session = bool(worker["session_id"] and worker["resume_mode"] == "same_session"
                                       and isinstance(saved_context.get("last_context_revision"), int)
-                                      and current_snapshot and not instructions_changed)
+                                      and current_snapshot and not instructions_changed and not snapshot_refreshed)
             context_request = {"sections": [] if same_saved_session else self._agent_initial_sections(worker["role"])}
             if same_saved_session:
                 context_request["after_revision"] = saved_context["last_context_revision"]
@@ -4171,6 +4199,8 @@ class Store:
                 "updates": context_packet["updates"],
                 **context_packet["sections"],
             }
+            if snapshot_refreshed:
+                task_context['evaluation_snapshot_refresh'] = saved_context['evaluation_snapshot_refresh']
             # One compact envelope per turn. The bridge's default get_context
             # response is controls plus event deltas, not another full bundle.
             task = {"worker": worker_view, "task_context": task_context}
@@ -6595,11 +6625,17 @@ class Store:
             # Company-scoped discovery questions may be included; they never
             # expose another worker's applicant facts or job materials.
             pass
+        snapshot_refreshed = False
+        if ({'job', 'applicant_index'} <= set(sections) and not pipeline['stop_requested']
+                and pipeline['status'] not in {'stopping', 'stopped', 'completed'}):
+            worker, snapshot_refreshed = self._agent_refresh_evaluator_snapshot(db, worker, 'get_context')
         revision = self._agent_context_revision(db)
         result = {"runtime_controls": self._agent_runtime_controls(db, worker, pipeline),
                   "context_revision": revision,
                   "updates": self._agent_context_updates(db, worker, request.get("after_revision"), revision),
                   "sections": {}}
+        if snapshot_refreshed:
+            result['evaluation_snapshot_refresh'] = self._agent_decode(worker['context'], {})['evaluation_snapshot_refresh']
         if request.get("source_ids") is not None:
             # One roundtrip can check live controls and hydrate the exact source
             # evidence the agent selected from the already supplied index.
@@ -6862,7 +6898,8 @@ class Store:
         if not job:
             raise KeyError(worker["job_id"])
         if job["jd_version"] != worker["jd_version"] or self.profile_version(db) != worker["profile_version"]:
-            raise Conflict("Job or applicant snapshot changed during evaluation; resume with fresh context.")
+            raise Conflict("Job or applicant snapshot changed during evaluation; call get_context with "
+                           "sections=['job','applicant_index'], reassess the changed evidence, then finish once.")
         reason = str(payload.get("reason") or "")[:12000]
         observation = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
         from .fit_scoring import assessment
