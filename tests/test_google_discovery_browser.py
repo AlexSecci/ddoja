@@ -108,3 +108,44 @@ def test_submission_browser_keeps_exact_original_click_without_recovery_observat
     bridge.catalog = [{'name': 'browser_click'}]; bridge.rpc = RPC([{'content': []}])
     bridge.call('browser_click', {'target': 'submit'})
     assert bridge.rpc.calls == [('browser_click', {'target': 'submit'})]
+
+
+def apple_snapshot(cards=True):
+    text='### Page\n- Page URL: https://jobs.apple.com/en-us/search?location=united-states-USA\n### Snapshot\n'
+    if cards:
+        text+='- link "Software Engineer" [ref=apple123]:\n  - /url: /en-us/details/123/software-engineer\n'
+    return {'content':[{'type':'text','text':text}]}
+
+
+def test_apple_shallow_result_observation_expands_native_cards_without_navigation():
+    rpc=RPC([apple_snapshot(False),apple_snapshot()])
+    result=discovery_call(rpc,'browser_snapshot',{'depth':3})
+    assert rpc.calls==[('browser_snapshot',{'depth':3}),('browser_snapshot',{})]
+    assert result['_meta']['ddoja']['apple_results']['native_job_links']==1
+    assert 'ref=apple123' in text_of(result)
+    assert 'read complete JDs' in text_of(result)
+
+
+def test_apple_scoped_snapshot_and_permission_failure_are_preserved():
+    rpc=RPC([apple_snapshot(False)])
+    discovery_call(rpc,'browser_snapshot',{'target':'facet','depth':3})
+    assert len(rpc.calls)==1
+    denied={'isError':True,'content':[{'type':'text','text':'Access denied'}]}
+    rpc=RPC([apple_snapshot(False),denied])
+    assert discovery_call(rpc,'browser_snapshot',{'depth':3})==denied
+
+
+def test_apple_results_already_containing_links_do_not_need_extra_observation():
+    rpc=RPC([apple_snapshot()])
+    result=discovery_call(rpc,'browser_snapshot',{})
+    assert result['_meta']['ddoja']['apple_results']['depth_expanded'] is False
+    assert len(rpc.calls)==1
+
+
+def test_apple_shallow_scoped_results_expand_only_that_observed_results_list():
+    shallow=apple_snapshot(False)
+    shallow['content'][0]['text']+='- list "Job Opportunities" [ref=results]:\n  - listitem [ref=card]\n'
+    rpc=RPC([shallow,apple_snapshot()])
+    result=discovery_call(rpc,'browser_snapshot',{'target':'results','depth':4})
+    assert rpc.calls[-1]==('browser_snapshot',{'target':'results'})
+    assert result['_meta']['ddoja']['apple_results']['native_job_links']==1

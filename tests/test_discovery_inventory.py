@@ -44,6 +44,91 @@ def board(s,worker):
             'tool':'browser_snapshot','arguments':{},'status':'completed','result':{'content':[{'type':'text','text':text}]}}}})
 
 
+def test_inventory_only_progress_continues_but_identical_reobservation_stops(tmp_path):
+    s=Store(tmp_path);p=s.create_agent_pipeline('Inventory progress','https://fixture.example/jobs')
+    w=s.list_agent_workers(p['id'])[0];launch=start(s,w)
+    s.agent_action(w['id'],launch['capability'],'checkpoint',{
+        'checkpoint':'Page one in owned tab', 'context':{'page':1,'tab_id':1,'tab_url':'https://fixture.example/jobs'}})
+    # Freeze a baseline with no full JD or inventory, on this same page.
+    launch=s.agent_launch_context(w['id'])
+    board(s,w)
+    entry={'url':'https://job-boards.greenhouse.io/fixture/jobs/202','title':'Software Engineer London, UK',
+           'requisition_id':'202','disposition':'unreviewed'}
+    def record_and_finish():
+        s.agent_action(w['id'],launch['capability'],'record_discovery_inventory',{'listings':[entry]})
+        return s.agent_action(w['id'],launch['capability'],'finish_discovery',{
+            'status':'incomplete','detail':'More results remain.', 'coverage':{'page':1}})
+    assert record_and_finish()['continuation']['state']=='queued'
+    s.finish_agent_turn(w['id'],{'disposition':'waiting','session_id':'session-'+w['id']})
+    assert s.reserve_agent_worker(w['id'])
+    launch=s.agent_launch_context(w['id'])
+    board(s,w)
+    assert record_and_finish()['continuation']['reason']=='no_durable_progress'
+
+
+def test_inventory_filter_decision_counts_but_reason_or_observation_rewrites_do_not(tmp_path):
+    s,p,w,launch,_=fixture(tmp_path);board(s,w)
+    with s.connect() as db:
+        before=s._agent_discovery_progress_snapshot(db,p['id'],{})
+    s.agent_action(w['id'],launch['capability'],'record_discovery_inventory',{'listings':[
+        {'url':'https://job-boards.greenhouse.io/fixture/jobs/202','disposition':'excluded','reason':'Explicitly London, outside US.'}]})
+    with s.connect() as db:
+        decided=s._agent_discovery_progress_snapshot(db,p['id'],{})
+    assert s._agent_discovery_has_progress(before,decided)
+    s.agent_action(w['id'],launch['capability'],'record_discovery_inventory',{'listings':[
+        {'url':'https://job-boards.greenhouse.io/fixture/jobs/202','disposition':'excluded','reason':'Reworded: not US.'}]})
+    with s.connect() as db:
+        repeated=s._agent_discovery_progress_snapshot(db,p['id'],{})
+    assert not s._agent_discovery_has_progress(decided,repeated)
+
+
+def test_older_dashboard_baseline_is_enriched_before_first_bridge_action(tmp_path):
+    s,p,w,launch,_=fixture(tmp_path);board(s,w)
+    with s.connect(write=True) as db:
+        row=db.execute('SELECT context FROM agent_workers WHERE id=?',(w['id'],)).fetchone()
+        context=json.loads(row['context']);context['discovery_turn_baseline'].pop('inventory')
+        db.execute('UPDATE agent_workers SET context=? WHERE id=?',(json.dumps(context),w['id']))
+        expected=s._agent_discovery_inventory_progress(db,p['id'])
+    s.agent_action(w['id'],launch['capability'],'get_context',{})
+    def saved_baseline():
+        with s.connect() as db:
+            return json.loads(db.execute('SELECT context FROM agent_workers WHERE id=?',(w['id'],)).fetchone()['context'])['discovery_turn_baseline']
+    baseline=saved_baseline()
+    assert baseline['inventory']==expected
+    with s.connect(write=True) as db:
+        db.execute("UPDATE agent_discovery_inventory SET disposition='excluded' WHERE requisition_id='202'")
+    s.agent_action(w['id'],launch['capability'],'get_context',{})
+    assert saved_baseline()['inventory']==expected
+
+
+def test_apple_visible_unprocessed_results_get_one_same_turn_correction_not_an_infinite_resume(tmp_path):
+    s=Store(tmp_path);p=s.create_agent_pipeline('Apple fixture','https://jobs.apple.com/en-us/search')
+    w=s.list_agent_workers(p['id'])[0];launch=start(s,w)
+    s.agent_action(w['id'],launch['capability'],'checkpoint',{'checkpoint':'Apple page one',
+        'context':{'tab_id':1,'tab_url':'https://jobs.apple.com/en-us/search','page':1}})
+    launch=s.agent_launch_context(w['id'])
+    text='''### Page
+- Page URL: https://jobs.apple.com/en-us/search
+### Snapshot
+- link "Software Engineer" [ref=role]:
+  - /url: /en-us/details/123/software-engineer
+'''
+    s.agent_runtime_event(w['id'],{'type':'tool_result','tool_name':'playwright.browser_snapshot','success':True,
+        'session_id':s.get_agent_worker(w['id'])['session_id'], 'transport_event':{'item':{
+            'type':'mcp_tool_call','server':'playwright','tool':'browser_snapshot',
+            'result':{'content':[{'type':'text','text':text}]}}}})
+    payload={'status':'incomplete','detail':'Results page recovered.','coverage':{}}
+    correction=s.agent_action(w['id'],launch['capability'],'finish_discovery',payload)
+    assert correction['continuation']['state']=='running'
+    assert correction['pending_observed_links']==['https://jobs.apple.com/en-us/details/123/software-engineer']
+    assert s.get_agent_worker(w['id'])['state']=='running'
+    # The live capability still permits real work, but a second empty yield
+    # preserves the guard rather than spawning another model turn.
+    s.agent_action(w['id'],launch['capability'],'get_context',{})
+    second=s.agent_action(w['id'],launch['capability'],'finish_discovery',payload)
+    assert second['continuation']['reason']=='no_durable_progress'
+
+
 def test_all_observed_identities_count_without_creating_jds_or_evaluators(tmp_path):
     s,p,w,launch,_=fixture(tmp_path);before=len(s.list_agent_workers(p['id']));board(s,w)
     c=s.agent_pipeline_counts(p['id'])

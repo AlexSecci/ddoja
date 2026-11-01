@@ -57,7 +57,7 @@ AGENT_HOST_CONTEXT_KEYS = {
     "first_application_review_required", "parent_context", "snapshot_supersession",
     "profile_refresh_supersession",
     "fit_score", "evaluation_scoring_version", "evaluation_jd_version", "evaluation_profile_version",
-    "discovery_turn_baseline", "last_context_revision", "browser_wait_scope", "instruction_digest",
+    "discovery_turn_baseline", "discovery_continue_generation", "last_context_revision", "browser_wait_scope", "instruction_digest",
     "reconciliation_recovery", "execution", "execution_history", "execution_handoff", "execution_change_deferred",
     "email_verification_final_scope",
     "instruction_contract_id", "context_handoff_pending", "context_handoffs",
@@ -4051,6 +4051,15 @@ class Store:
                 progress[key] = json.loads(encoded)
         return progress
 
+    @staticmethod
+    def _agent_discovery_inventory_progress(db, pipeline_id):
+        # Inventory-only identities and filter decisions are durable work too.
+        # Exclude timestamps, source events and prose: re-observing the same
+        # identity or rewriting a reason must not keep a stalled loop alive.
+        return [dict(row) for row in db.execute(
+            "SELECT id,requisition_id,url,disposition,job_id FROM agent_discovery_inventory "
+            "WHERE pipeline_id=? ORDER BY id", (pipeline_id,))]
+
     def _agent_discovery_progress_snapshot(self, db, pipeline_id, context, coverage=None):
         listings = [
             {"job_id": row["job_id"], "url": row["url"], "requisition_id": row["requisition_id"],
@@ -4061,6 +4070,7 @@ class Store:
                 "WHERE pj.pipeline_id=? ORDER BY pj.job_id", (pipeline_id,))
         ]
         return {"listings": listings,
+                "inventory": self._agent_discovery_inventory_progress(db, pipeline_id),
                 "checkpoint_progress": self._agent_discovery_checkpoint_progress(context),
                 "coverage_progress": self._agent_discovery_checkpoint_progress(coverage)}
 
@@ -4069,6 +4079,8 @@ class Store:
         if not isinstance(baseline, dict):
             baseline = {}
         if baseline.get("listings", []) != current.get("listings", []):
+            return True
+        if baseline.get("inventory", []) != current.get("inventory", []):
             return True
         for key in ("checkpoint_progress", "coverage_progress"):
             before = dict(baseline.get(key)) if isinstance(baseline.get(key), dict) else {}
@@ -4119,6 +4131,23 @@ class Store:
                     "Discovery reported incomplete coverage without new listing or page progress; explicit resume is required."}
         return {"state": "queued", "resume_mode": "same_session",
                 "reason": "durable_progress"}
+
+    def _agent_discovery_visible_apple_work(self, db, worker):
+        from urllib.parse import urljoin
+        from .discovery_browser import page_url, text_of
+        text = text_of(self._agent_capture_ref(db, worker) or {})
+        page = page_url(text)
+        parsed = urlsplit(page or '')
+        if (parsed.scheme != 'https' or parsed.hostname != 'jobs.apple.com'
+                or parsed.path.rstrip('/') != '/en-us/search'):
+            return []
+        observed = {urljoin(page, href) for href in re.findall(
+            r'(?m)^\s*- /url: (/en-us/details/\S+)\s*$', text)}
+        done = {row[0] for row in db.execute(
+            'SELECT j.url FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id WHERE pj.pipeline_id=? '
+            "UNION SELECT url FROM agent_discovery_inventory WHERE pipeline_id=? AND disposition='excluded'",
+            (worker['pipeline_id'], worker['pipeline_id']))}
+        return sorted(observed - done)
 
     def _agent_refresh_evaluator_snapshot(self, db, worker, source):
         """Bind a fresh evaluation read, never a submission or document approval."""
@@ -5694,6 +5723,19 @@ class Store:
                     raise Conflict("Pipeline stop was recorded; no further work action may start.")
             if not self._agent_action_allowed(worker["role"], action):
                 raise Conflict("This worker role is not allowed to perform that action.")
+            if worker['role'] == 'discovery':
+                context = self._agent_decode(worker['context'], {})
+                baseline = context.get('discovery_turn_baseline')
+                if isinstance(baseline, dict) and 'inventory' not in baseline:
+                    # Rolling deployment: an older dashboard may have created
+                    # this turn's baseline. Add inventory before its first
+                    # bridge action, never after recording new work. This also
+                    # avoids treating old inventory as progress on every turn.
+                    baseline['inventory'] = self._agent_discovery_inventory_progress(db, worker['pipeline_id'])
+                    db.execute('UPDATE agent_workers SET context=? WHERE id=?',
+                               (json.dumps(context, ensure_ascii=False), worker_id))
+                    worker = db.execute("SELECT w.*,p.mode,p.stop_requested,p.status AS pipeline_status,p.company_id,p.agent_test_only "
+                                        "FROM agent_workers w JOIN pipelines p ON p.id=w.pipeline_id WHERE w.id=?", (worker_id,)).fetchone()
             recovery = self._agent_decode(worker["context"], {}).get("reconciliation_recovery", {})
             if recovery.get("read_only"):
                 allowed = {"get_context", "retrieve_sources", "get_browser_guidance", "checkpoint",
@@ -5805,6 +5847,25 @@ class Store:
                     context = self._agent_decode(worker["context"], {})
                     continuation = self._agent_discovery_continuation(
                         db, worker, context, coverage, bool(worker["agent_test_only"]))
+                    if (continuation.get('reason') == 'no_durable_progress'
+                            and context.get('discovery_continue_generation') != worker['launch_generation']):
+                        pending = self._agent_discovery_visible_apple_work(db, worker)
+                        if pending:
+                            # One same-turn correction, not an automatic restart.
+                            # Repeated empty yields still hit the existing guard.
+                            context['discovery_continue_generation'] = worker['launch_generation']
+                            db.execute('UPDATE agent_workers SET context=? WHERE id=?',
+                                       (json.dumps(context, ensure_ascii=False), worker_id))
+                            correction = {'status':'continue', 'worker_id':worker_id,
+                                'continuation':{'state':'running','reason':'visible_unprocessed_results'},
+                                'pending_observed_links':pending[:3], 'pending_on_observed_page':len(pending),
+                                'next_action':'Do not end this turn yet. The native results contain unprocessed job links. '
+                                    'Continue on the retained page: record observed identities, open the next relevant full JD, '
+                                    'and save it or an evidence-based filter exclusion. A recovered results page is not a blocker. '
+                                    'Then checkpoint real progress. Report blocked only for a verified failure, and preserve '
+                                    'all user stops, quotas, permission and human-action gates. No browser approval is granted.'}
+                            self.event(db, 'agent.discovery_continue_requested', correction, actor='agent_scheduler')
+                            return correction
                 elif status == "blocked" and not detail:
                     detail = "Discovery reported a blocker without a specific explanation."
                 discovery = {"status": status, "detail": detail, "coverage": coverage,

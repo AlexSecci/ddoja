@@ -1,4 +1,4 @@
-"""Read-only Google Careers navigation and native results evidence.
+"""Read-only careers navigation and native Google/Apple results evidence.
 
 Google keeps an accessibility announcement saying 'Loading job details' after
 the listing cards have rendered. It is not a reliable readiness condition.
@@ -97,6 +97,41 @@ def results_evidence(rpc, result, arguments=None):
     return {**result, 'content': [{'type': 'text', 'text': note}, *result.get('content', [])], '_meta': meta}
 
 
+def apple_results_evidence(rpc, result, arguments=None):
+    arguments = arguments or {}
+    text = text_of(result)
+    url = page_url(text)
+    parsed = urlsplit(url or '')
+    results_target = bool(arguments.get('target') and re.search(r'(?m)^- list "Job Opportunities"', text))
+    if (result.get('isError') or parsed.scheme != 'https' or parsed.hostname != 'jobs.apple.com'
+            or parsed.path.rstrip('/') != '/en-us/search'
+            or arguments.get('filename') or (arguments.get('target') and not results_target)):
+        return result
+    links = set(re.findall(r'(?m)^\s*- /url: (/en-us/details/\S+)\s*$', text))
+    expanded = False
+    if not links:
+        # Apple's result cards are nested below the shallow snapshot boundary.
+        # Observe the actual complete tree, without navigating or changing tabs.
+        result = rpc.call('browser_snapshot', {'target':arguments['target']} if results_target else {})
+        if result.get('isError'):
+            return result
+        text = text_of(result)
+        links = set(re.findall(r'(?m)^\s*- /url: (/en-us/details/\S+)\s*$', text))
+        expanded = True
+    if not links:
+        return result
+    note = (f'Discovery results evidence: {len(links)} distinct native Apple job-detail links are present. '
+            'The search results are not empty; shallow snapshots can hide their nested cards. '
+            'Use the observed detail links to read complete JDs, not just the expandable card summary. '
+            'An inventory identity is not a captured JD. Continue processing the saved frontier; '
+            'a single listing or ordinary page boundary is not a blocker or completion. '
+            'Preserve exact controls, checkpoints and any actual permission or human-action gate.')
+    meta = {**result.get('_meta', {})}
+    meta['ddoja'] = {**meta.get('ddoja', {}), 'apple_results': {
+        'native_job_links': len(links), 'depth_expanded': expanded}}
+    return {**result, 'content': [{'type': 'text', 'text': note}, *result.get('content', [])], '_meta': meta}
+
+
 def discovery_call(rpc, name, arguments):
     if name == 'browser_click' and not arguments.get('modifiers') and arguments.get('button', 'left') == 'left':
         reference = arguments.get('target') or arguments.get('ref')
@@ -117,5 +152,6 @@ def discovery_call(rpc, name, arguments):
                             'requested_tool': name, 'actual_tool': 'browser_navigate', 'observed_url': destination}}}
     result = rpc.call(name, arguments)
     if name in {'browser_snapshot', 'browser_navigate', 'browser_navigate_back', 'browser_click', 'browser_wait_for'}:
-        return results_evidence(rpc, result, arguments if name == 'browser_snapshot' else {})
+        scoped = arguments if name == 'browser_snapshot' else {}
+        return apple_results_evidence(rpc, results_evidence(rpc, result, scoped), scoped)
     return result
