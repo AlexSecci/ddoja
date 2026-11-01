@@ -22,7 +22,7 @@
     <p class="sidebar-label">Your command center</p>
     <nav aria-label="Workspace views" class="primary-nav">
       <button type="button" data-view="pipelines" class="active" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Pipelines</span><span class="nav-index">01</span></button>
-      <button type="button" data-view="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V4h8v3M3 12h18M10 12v3h4v-3"/></svg><span>Applications</span><span class="nav-index">02</span></button>
+      <button type="button" data-view="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V4h8v3M3 12h18M10 12v3h4v-3"/></svg><span>All jobs</span><span class="nav-index">02</span></button>
       <button type="button" data-view="inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM4 13h5l2 3h2l2-3h5M9 8h6"/></svg><span>Agent inbox</span><span id="inbox-nav-count" class="nav-index">03</span></button>
       <button type="button" data-view="technologies"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 6-5 6 5 6m8-12 5 6-5 6m-3-15-2 18"/></svg><span>Technology history</span><span class="nav-index">04</span></button>
       <button type="button" data-view="companies"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V3h11v18m0-12h5v12M8 7h3M8 11h3M8 15h3M2 21h20"/></svg><span>Saved companies</span><span class="nav-index">05</span></button>
@@ -131,19 +131,22 @@
       <div class="section-heading">
         <div>
           <p class="eyebrow">Saved records</p>
-          <h2>Applications</h2>
-          <p class="intro">The paper trail behind your next chapter.</p>
+          <h2>All jobs</h2>
+          <p class="intro">Every company, one ranked list.</p>
         </div>
       </div>
       <section id="summary" class="summary-cards" aria-label="Queue summary"></section>
       <div class="toolbar job-toolbar">
-        <input id="search" placeholder="Search title, requisition or company" aria-label="Search applications">
+        <input id="search" placeholder="Search title, requisition or company" aria-label="Search jobs">
+        <label>Company<select id="jobs-company"><option value="">All companies</option></select></label>
+        <label>State<select id="jobs-state"><option value="all">All states</option><option value="scored">Scored</option><option value="unscored">Unscored</option><option value="legacy">Legacy evaluation</option><option value="needs_rescoring">Needs rescoring</option><option value="submitted">Submitted</option><option value="discarded">Discarded</option><option value="uncertain">Uncertain</option><option value="excluded">Excluded by filters</option><option value="active">Active</option><option value="failed">Needs attention</option></select></label>
+        <label>Order<select id="jobs-order"><option value="score_desc">Score: highest first</option><option value="score_asc">Score: lowest first</option><option value="company">Company, then highest score</option></select></label>
         <button id="refresh" type="button">Refresh</button>
       </div>
-      <p class="hint">This view includes historical records from all companies. A prepared or reviewed package does not mean an application was sent.</p>
+      <p class="hint">Scores use the current job and applicant evidence. Unscored records sort last. Manual submitted/discarded decisions prevent future applications across campaigns.</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Role</th><th>Location</th><th>Stage</th><th>Progress</th><th></th></tr></thead>
+          <thead><tr><th>Role</th><th>Score</th><th>Location</th><th>State</th><th>Details</th><th>Actions</th></tr></thead>
           <tbody id="job-rows"></tbody>
         </table>
       </div>

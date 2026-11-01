@@ -489,3 +489,8 @@ footer { margin-top: 25px; padding-top: 20px; color: #a08baa; border-color: #322
 .worker-settings-row legend { font-weight: 600; padding: 0; }
 .worker-settings-row .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 680px) { .worker-settings-row .form-grid { grid-template-columns: 1fr; } }
+.job-toolbar { flex-wrap: wrap; align-items: end; }
+.job-toolbar > input { flex: 1 1 220px; }
+.job-toolbar > label { display: grid; gap: 5px; font-size: 11px; color: var(--muted, #aaa8bc); flex: 1 1 150px; }
+.job-toolbar select { min-height: 40px; width: 100%; }
+.job-manual-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }

@@ -278,6 +278,10 @@ class Store:
             from .request_metrics import SCHEMA as request_metrics_schema
             db.executescript(request_metrics_schema)
             columns = {row[1] for row in db.execute("PRAGMA table_info(pipeline_jobs)")}
+            job_columns = {row[1] for row in db.execute('PRAGMA table_info(jobs)')}
+            for name in ('manual_status', 'manual_status_note', 'manual_status_at'):
+                if name not in job_columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             for name, declaration in (
                     ("manual_discard_reason", "TEXT NOT NULL DEFAULT ''"),
                     ("manual_discard_provenance", "TEXT NOT NULL DEFAULT ''"),
@@ -429,7 +433,7 @@ class Store:
                 job_id, version = old["id"], old["jd_version"] + 1
                 # Never erase a submission or an unresolved possible submission on rediscovery.
                 interrupted_submission = old["active_stage"] == "submission" and old["run_status"] == "running"
-                protected = old["phase"] == "submitted" or old["run_status"] == "submission_uncertain" or interrupted_submission
+                protected = bool(old['manual_status']) or old["phase"] == "submitted" or old["run_status"] == "submission_uncertain" or interrupted_submission
                 db.execute("UPDATE jobs SET title=?,url=?,location=?,country=?,employment=?,arrangement=?,"
                            "jd_version=?,last_seen_at=?,phase=?,run_status=?,reason=?,active_stage=NULL,"
                            "lease_owner=NULL,lease_token=NULL,lease_until=NULL WHERE id=?",
@@ -468,6 +472,14 @@ class Store:
             raise ValueError("Invalid table.")
         with self.connect() as db:
             return [dict(row) for row in db.execute(f"SELECT * FROM {table}")]
+
+    def job_records(self, **filters):
+        from .job_records import records
+        return records(self, **filters)
+
+    def set_manual_job_status(self, job_id, status, note=''):
+        from .job_records import set_manual_status
+        return set_manual_status(self, job_id, status, note)
 
     def create_pipeline(self, company_id, title_contains="", location_contains=""):
         company_id = identity(company_id)
@@ -530,7 +542,7 @@ class Store:
                 counts["evaluated"] += 1
             if decision == "approve":
                 counts["accepted"] += 1
-            if row["phase"] == "submitted" and row["has_submission_evidence"]:
+            if row['manual_status'] == 'submitted' or row["phase"] == "submitted" and row["has_submission_evidence"]:
                 counts["submitted"] += 1
                 outcome = row["application_status"] or "unknown"
                 counts["recruiter_" + outcome] += 1
@@ -825,6 +837,11 @@ class Store:
                     "note": auth_note}
                 discard, discard_note = self._manual_discard_status(db, job["id"], pipeline_id)
                 job["manual_discard"] = {"available": discard is not None, "note": discard_note}
+                active = bool(job['active_stage'] or job['lease_token'] or db.execute(
+                    'SELECT 1 FROM agent_workers WHERE job_id=? AND turn_active=1', (job['id'],)).fetchone())
+                submitted = job['phase'] == 'submitted' or job['has_submission_receipt']
+                job['manual_submitted_available'] = not active and not submitted
+                job['manual_discard_available'] = not active and not submitted and job['manual_status'] != 'discarded'
                 result.append(job)
             return {"pipeline_id": pipeline_id, "jobs": result}
 
@@ -1806,7 +1823,7 @@ class Store:
                 parameters = (phases[stage], *statuses, *((pipeline_id,) if pipeline_id else ()),
                               *((job_id,) if job_id else ()), *skipped)
                 row = db.execute("SELECT j.* FROM jobs j JOIN companies c ON j.company_id=c.id "
-                                 f"WHERE j.phase=? AND j.run_status IN ({placeholders}) AND c.enabled=1{scope}{global_scope}{exact}{skip_sql} "
+                                 f"WHERE j.phase=? AND j.manual_status='' AND j.run_status IN ({placeholders}) AND c.enabled=1{scope}{global_scope}{exact}{skip_sql} "
                                  "ORDER BY j.first_seen_at,j.id LIMIT 1", parameters).fetchone()
                 if not row:
                     return None
@@ -2181,13 +2198,14 @@ class Store:
                              context=None, resume_mode="new_session"):
         now = timestamp()
         worker_id = uuid.uuid4().hex
-        job = db.execute("SELECT jd_version FROM jobs WHERE id=?", (job_id,)).fetchone() if job_id else None
+        job = db.execute("SELECT jd_version,manual_status FROM jobs WHERE id=?", (job_id,)).fetchone() if job_id else None
+        initial_state = 'stopped' if job and job['manual_status'] else 'queued'
         db.execute("INSERT INTO agent_workers(id,pipeline_id,job_id,parent_id,role,state,resume_mode,context,"
-                   "jd_version,profile_version,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?)",
-                   (worker_id, pipeline_id, job_id, parent_id, role, resume_mode,
+                   "jd_version,profile_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (worker_id, pipeline_id, job_id, parent_id, role, initial_state, resume_mode,
                     json.dumps(context or {}, ensure_ascii=False), job["jd_version"] if job else None,
                     self.profile_version(db), now, now))
-        self.event(db, "agent.worker_queued", {"pipeline_id": pipeline_id, "worker_id": worker_id,
+        self.event(db, 'agent.worker_queued' if initial_state == 'queued' else 'agent.worker_withheld', {"pipeline_id": pipeline_id, "worker_id": worker_id,
                    "parent_id": parent_id, "job_id": job_id, "role": role}, job_id, "agent_scheduler")
         return worker_id
 
@@ -2250,7 +2268,7 @@ class Store:
 
     def _agent_pipeline_counts(self, db, pipeline_id):
         current_profile_version = self.profile_version(db)
-        rows = db.execute("SELECT pj.selected,pj.agent_decision,pj.agent_status,pj.manual_discard_reason,j.id,j.phase,j.run_status,j.jd_version,"
+        rows = db.execute("SELECT pj.selected,pj.agent_decision,pj.agent_status,pj.manual_discard_reason,j.id,j.phase,j.run_status,j.jd_version,j.manual_status,"
                           "pj.fit_score,pj.fit_jd_version,pj.fit_profile_version,pj.fit_payload,"
                           "o.status AS application_status FROM pipeline_jobs pj JOIN jobs j ON j.id=pj.job_id "
                           "LEFT JOIN application_outcomes o ON o.job_id=j.id WHERE pj.pipeline_id=?",
@@ -2270,6 +2288,7 @@ class Store:
                 counts["scored"] += 1
                 if (row["fit_score"] > 0 and self._agent_decode(row["fit_payload"], {}).get("eligibility") == "eligible"
                         and not row["manual_discard_reason"]
+                        and not row['manual_status']
                         and row["phase"] not in {"submitted", "discarded"}
                         and row["agent_status"] not in {"submitted", "uncertain", "discarded"}
                         and row["run_status"] != "submission_uncertain"):
@@ -2286,7 +2305,7 @@ class Store:
                 outcome = row["application_status"] or "unknown"
                 counts["recruiter_" + outcome] += 1
                 continue
-            if row["agent_status"] == "discarded" or decision == "discard":
+            if row['manual_status'] == 'discarded' or row['phase'] == 'discarded' or row["agent_status"] == "discarded" or decision == "discard":
                 counts["discarded"] += 1
             if row["agent_status"] == "uncertain" or row["run_status"] == "submission_uncertain":
                 counts["uncertain"] += 1
@@ -3450,7 +3469,7 @@ class Store:
                        or old["url"] != url or prior_metadata != metadata)
             if changed:
                 version = old["jd_version"] + 1
-                protected = old["phase"] == "submitted" or old["run_status"] == "submission_uncertain"
+                protected = bool(old['manual_status']) or old["phase"] == "submitted" or old["run_status"] == "submission_uncertain"
                 db.execute("UPDATE jobs SET title=?,url=?,location=?,country=?,employment=?,arrangement=?,jd_version=?,"
                            "last_seen_at=?,phase=?,run_status=?,reason=? WHERE id=?",
                            (title.strip(), url, str(metadata.get("location") or ""),
@@ -4288,6 +4307,8 @@ class Store:
                 return False
             if row["pipeline_status"] in {"stopped", "stopping", "completed"}:
                 return False
+            if row['job_id'] and db.execute("SELECT 1 FROM jobs WHERE id=? AND manual_status!=''", (row['job_id'],)).fetchone():
+                return False
             if row["role"] == "discovery" and row["discovery_paused"]:
                 return False
             if row["started_at"] is None and ((row["role"] == "evaluator" and row["evaluation_paused"])
@@ -4580,6 +4601,7 @@ class Store:
                        (now, pipeline_id))
             resume_epoch = uuid.uuid4().hex
             for saved in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND turn_active=0 "
+                                    "AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=agent_workers.job_id AND j.manual_status!='') "
                                     "AND state NOT IN ('completed','discarded','superseded','uncertain','session_missing')", (pipeline_id,)).fetchall():
                 if roles is not None and saved['role'] not in roles:
                     continue
@@ -4589,7 +4611,8 @@ class Store:
                 if trial and (saved['role']=='discovery' and trial['max_discovery_invocations']==0 or saved['role']!='discovery' and saved['job_id'] not in trial['job_ids']):
                     continue
                 self._agent_prepare_browser_resume(db, saved, resume_epoch, now, "user explicitly resumed this pipeline")
-            for worker in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND state IN ('stopped','interrupted','failed','quota_paused')",
+            for worker in db.execute("SELECT * FROM agent_workers WHERE pipeline_id=? AND state IN ('stopped','interrupted','failed','quota_paused') "
+                                     "AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=agent_workers.job_id AND j.manual_status!='')",
                                      (pipeline_id,)).fetchall():
                 if roles is not None and worker['role'] not in roles:
                     continue
@@ -7408,7 +7431,7 @@ class Store:
                 "AND pj.fit_score>0 AND pj.fit_jd_version=j.jd_version AND pj.fit_profile_version=? "
                 "AND json_extract(pj.fit_payload,'$.eligibility')='eligible' "
                 "AND json_extract(pj.fit_payload,'$.scoring_version')=? "
-                "AND j.phase NOT IN ('submitted','discarded') AND j.run_status!='submission_uncertain' "
+                "AND j.manual_status='' AND j.phase NOT IN ('submitted','discarded') AND j.run_status!='submission_uncertain' "
                 "AND pj.agent_status NOT IN ('submitted','uncertain','discarded') "
                 "AND NOT EXISTS(SELECT 1 FROM agent_workers w WHERE w.pipeline_id=pj.pipeline_id "
                 "AND w.job_id=pj.job_id AND w.role='submission' AND w.state!='superseded') "
@@ -7440,6 +7463,7 @@ class Store:
                               "LEFT JOIN pipeline_jobs pj ON pj.pipeline_id=w.pipeline_id AND pj.job_id=w.job_id "
                               "LEFT JOIN jobs j ON j.id=w.job_id "
                               "WHERE w.state='queued' AND p.mode='agentic' AND p.stop_requested=0 "
+                              "AND (w.job_id IS NULL OR j.manual_status='') "
                               "AND p.status NOT IN ('stopped','completed','stopping') "
                               "ORDER BY CASE w.role WHEN 'document' THEN 0 WHEN 'submission' THEN 1 WHEN 'evaluator' THEN 2 ELSE 3 END,"
                               "CASE WHEN w.role='submission' AND EXISTS(SELECT 1 FROM agent_browser_controls c "

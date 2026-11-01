@@ -159,6 +159,11 @@ class PipelineJobDiscard(Strict):
     provenance: str = Field(min_length=1, max_length=500)
 
 
+class ManualJobStatus(Strict):
+    status: Literal['submitted', 'discarded']
+    note: str = Field(default='', max_length=500)
+
+
 class ListingInput(Strict):
     company_id: str
     requisition_id: str | None = None
@@ -550,8 +555,14 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
         return status
 
     @app.get("/api/jobs")
-    def jobs():
-        return store.listing("jobs")
+    def jobs(state: str='all', company_id: str | None=None, order: str='score_desc', q: str=''):
+        return store.job_records(state=state, company_id=company_id, order=order, query=q)
+
+    @app.post('/api/jobs/{job_id}/manual-status')
+    def manual_job_status(job_id: str, body: ManualJobStatus):
+        result = store.set_manual_job_status(job_id, body.status, body.note)
+        app.state.agent_pipeline_manager.schedule()
+        return result
 
     @app.get("/api/jobs/{job_id}")
     def job_detail(job_id: str):
@@ -761,6 +772,8 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
                    "agent_reason", "agent_status", "adoption", "submission_uncertain",
                    "application_outcome", "job_title", "profile_refresh", "fit_score", "fit_current",
                    "fit_assessment", "fit_jd_version", "fit_profile_version")
+        allowed = (*allowed, 'manual_status', 'manual_status_note', 'manual_status_at',
+                   'manual_submitted_available', 'manual_discard_available')
         rows = []
         for job in payload["jobs"]:
             if view=='backlog' and (job.get('phase')=='submitted' or job.get('agent_status')=='submitted' or job.get('has_submission_receipt')):

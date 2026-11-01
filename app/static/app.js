@@ -950,12 +950,13 @@ function renderPipelineJobs(p, view) {
       decision.append(element('p', 'Evaluation-time rationale only; this is not a current submission authorization. ' + (job.agent_reason || job.reason), 'sub'));
     }
     const application = element('td');
-    application.append(element('span', humanize(job.application_status || job.run_status || 'not submitted'), 'badge'));
+    application.append(element('span', job.manual_status ? humanize(job.manual_status) + ' · manual' : humanize(job.application_status || job.run_status || 'not submitted'), 'badge'));
     if (job.application_provenance) application.append(element('p', job.application_provenance, 'sub'));
     const action = element('td');
-    if (job.run_status === 'submission_uncertain' || job.submission_uncertain) {
+    if (!job.manual_status && (job.run_status === 'submission_uncertain' || job.submission_uncertain)) {
       action.append(element('p', 'The final action may have happened. Reconcile saved session evidence; do not retry it.', 'worker-error'));
     }
+    action.append(manualJobButtons(job));
     const profileRefresh = job.profile_refresh || {};
     if (p.mode === 'agentic' && job.selected === true && profileRefresh.eligible === true) {
       const key = actionKey('profile-refresh', job.id);
@@ -1556,21 +1557,80 @@ function renderWorkspaceOverview() {
 function renderSummary() {
   const root = $('summary'), nodes = [];
   [
-    ['Historical job records', jobs.length],
+    ['Job records', jobs.length],
     ['Recorded as submitted', jobs.filter(job => job.phase === 'submitted').length],
     ['Companies with saved jobs', new Set(jobs.map(job => job.company_id).filter(Boolean)).size],
-    ['Pending legacy questions', summaries.pending_questions || 0],
+    ['Scored jobs', jobs.filter(job => job.fit_current).length],
   ].forEach(([label, value]) => {
     const card = withRenderKey(element('div', undefined, 'summary-card'), 'summary:' + label);
     card.append(element('strong', count(value)), element('span', label)); nodes.push(card);
   });
   preserveViewport(root, () => reconcileChildren(root, nodes));
 }
+function filterJobRecords(records, { query = '', company = '', state = 'all', order = 'score_desc' } = {}) {
+  const text = query.trim().toLocaleLowerCase();
+  return records.filter(job => (!company || job.company_id === company)
+    && (state === 'all' || (state === 'scored' ? job.fit_current === true
+      : state === 'unscored' ? job.fit_current !== true : job.record_status === state))
+    && [job.title, job.company_name, job.location, job.requisition_id]
+      .some(value => String(value || '').toLocaleLowerCase().includes(text)))
+    .sort((a, b) => {
+      const companyOrder = String(a.company_name || a.company_id).localeCompare(String(b.company_name || b.company_id), undefined, { sensitivity: 'base' });
+      if (order === 'company' && companyOrder) return companyOrder;
+      const aScore = a.fit_current ? a.fit_score : null, bScore = b.fit_current ? b.fit_score : null;
+      if (aScore == null && bScore != null) return 1;
+      if (bScore == null && aScore != null) return -1;
+      if (aScore != null && bScore != null && aScore !== bScore) return order === 'score_asc' ? aScore - bScore : bScore - aScore;
+      return companyOrder || String(a.title || '').localeCompare(String(b.title || '')) || String(a.id).localeCompare(String(b.id));
+    });
+}
+
+function manualJobButtons(job) {
+  const group = element('div', undefined, 'job-manual-actions');
+  [['submitted', 'Mark submitted', job.manual_submitted_available], ['discarded', 'Discard', job.manual_discard_available]]
+    .forEach(([status, label, available]) => {
+      const control = button(label, 'small-button', () => markJobStatus(job, status));
+      control.disabled = available !== true || actionInFlight('manual-job:' + job.id);
+      control.title = available ? (status === 'submitted' ? 'Record that you already applied to this job.' : 'Do not apply to this job.')
+        : job.worker_active ? 'Stop the active worker and wait for its checkpoint first.' : 'This job already has a terminal status.';
+      control.setAttribute('aria-label', label + ': ' + (job.title || 'Untitled role') + ' at ' + (job.company_name || job.company_id));
+      group.append(control);
+    });
+  return group;
+}
+
+async function markJobStatus(job, status) {
+  const message = status === 'submitted'
+    ? 'Record that you have already applied to “' + job.title + '”? DDoJA will not apply to this job again.'
+    : 'Discard “' + job.title + '”? DDoJA will not apply to this job in any campaign.';
+  if (!window.confirm(message)) return;
+  const key = 'manual-job:' + job.id;
+  if (!beginAction(key)) return;
+  try {
+    await api('jobs/' + segment(job.id) + '/manual-status', { method: 'POST', body: JSON.stringify({ status }) });
+    pipelineJobs.clear();
+    setStatus(status === 'submitted' ? 'Already-applied status recorded. This job will not be applied to again.' : 'Job discarded. Future applications are blocked.');
+    if (currentJobDetail?.id === job.id) await showJob(job.id);
+    await refreshDashboard();
+  } catch (error) { setStatus(error.message); }
+  finally { endAction(key); if (currentView === 'jobs') renderJobs(); }
+}
+
 function renderJobs() {
   const body = $('job-rows'), nodes = [];
-  const query = $('search').value.trim().toLocaleLowerCase();
-  const filtered = jobs.filter(job => [job.title, job.company_name, job.location, job.requisition_id]
-    .some(value => String(value || '').toLocaleLowerCase().includes(query)));
+  const companySelect = $('jobs-company');
+  const companyOptions = [...new Map(jobs.map(job => [job.company_id, job.company_name || job.company_id])).entries()]
+    .sort((a, b) => a[1].localeCompare(b[1]));
+  const signature = JSON.stringify(companyOptions);
+  if (companySelect.dataset.options !== signature) {
+    const previous = companySelect.value;
+    const all = element('option', 'All companies'); all.value = '';
+    companySelect.replaceChildren(all, ...companyOptions.map(([id, name]) => { const option = element('option', name); option.value = id; return option; }));
+    companySelect.value = companyOptions.some(([id]) => id === previous) ? previous : '';
+    companySelect.dataset.options = signature;
+  }
+  const query = $('search').value;
+  const filtered = filterJobRecords(jobs, { query, company: companySelect.value, state: $('jobs-state').value, order: $('jobs-order').value });
   const pages = Math.max(1, Math.ceil(filtered.length / jobsPerPage));
   jobPage = Math.min(Math.max(0, jobPage), pages - 1);
   const first = jobPage * jobsPerPage;
@@ -1579,23 +1639,28 @@ function renderJobs() {
   $('jobs-previous').disabled = jobPage === 0;
   $('jobs-next').disabled = jobPage + 1 >= pages;
   if (!filtered.length) {
-    const row = element('tr'), cell = element('td', query ? 'No matching historical records.' : 'No historical records are available.');
-    cell.colSpan = 5; row.append(cell); nodes.push(withRenderKey(row, 'empty'));
+    const row = element('tr'), cell = element('td', 'No jobs match these filters.');
+    cell.colSpan = 6; row.append(cell); nodes.push(withRenderKey(row, 'empty'));
     preserveViewport(body, () => reconcileChildren(body, nodes)); return;
   }
   filtered.slice(first, first + jobsPerPage).forEach(job => {
     const row = withRenderKey(element('tr'), 'job:' + job.id), role = element('td');
     role.append(element('strong', job.title || 'Untitled role'), element('p', job.company_name || job.company_id || '', 'sub'));
+    if (job.requisition_id) role.append(element('p', 'Req ' + job.requisition_id, 'sub'));
+    if (job.url) { const link = element('a', 'Open listing'); link.href = job.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; role.append(link); }
+    const score = element('td'); score.append(element('span', job.fit_current ? String(job.fit_score) + '/100' : 'Unscored', 'badge'));
     const location = element('td', job.location || 'Unknown');
-    const jobState = job.application_status || job.phase || 'unknown';
+    const jobState = job.record_status || job.phase || 'unknown';
     const stage = element('td');
     stage.append(element('span', humanize(jobState), 'badge status-' + String(jobState).replace(/[^a-z_]/g, '')));
-    const progress = element('td', job.application_provenance || (job.phase === 'submitted' ? 'Submission recorded' : job.run_status && job.run_status !== 'idle' ? humanize(job.run_status) : 'Saved record'));
+    const progress = element('td', job.manual_status ? 'Manually marked ' + humanize(job.manual_status) + '. ' + (job.manual_status_note || '')
+      : job.application_provenance || (job.phase === 'submitted' ? 'Submission recorded' : job.run_status && job.run_status !== 'idle' ? humanize(job.run_status) : 'Saved record'));
     const action = element('td');
     const recordButton = button('View record', 'small-button', () => showJob(job.id));
     recordButton.setAttribute('aria-label', 'View record for ' + (job.title || 'untitled role') + ' at ' + (job.company_name || job.company_id || 'company'));
     action.append(recordButton);
-    row.append(role, location, stage, progress, action); nodes.push(row);
+    action.append(manualJobButtons(job));
+    row.append(role, score, location, stage, progress, action); nodes.push(row);
   });
   preserveViewport(body, () => reconcileChildren(body, nodes));
 }
@@ -2000,6 +2065,7 @@ $('pipeline-refresh').addEventListener('click', () => refreshDashboard().catch(e
 $('inbox-refresh').addEventListener('click', () => refreshDashboard().catch(error => setStatus(error.message)));
 $('refresh').addEventListener('click', () => refreshDashboard().catch(error => setStatus(error.message)));
 $('search').addEventListener('input', () => { jobPage = 0; renderJobs(); });
+['jobs-company', 'jobs-state', 'jobs-order'].forEach(id => $(id).addEventListener('change', () => { jobPage = 0; renderJobs(); }));
 $('jobs-previous').addEventListener('click', () => { jobPage -= 1; renderJobs(); $('jobs').scrollIntoView({ block: 'start', behavior: 'instant' }); });
 $('jobs-next').addEventListener('click', () => { jobPage += 1; renderJobs(); $('jobs').scrollIntoView({ block: 'start', behavior: 'instant' }); });
 $('technology-search').addEventListener('input', renderTechnologies);
@@ -2032,7 +2098,7 @@ $('outcome-form').addEventListener('submit', async event => {
   } catch (error) { setStatus(error.message); }
 });
 $('close-detail').addEventListener('click', () => { $('detail').classList.add('hidden'); currentJobDetail = null; });
-const workspaceViews = { pipelines: 'Pipelines', jobs: 'Applications', inbox: 'Agent inbox', technologies: 'Technology history', companies: 'Saved companies', settings: 'Settings' };
+const workspaceViews = { pipelines: 'Pipelines', jobs: 'All jobs', inbox: 'Agent inbox', technologies: 'Technology history', companies: 'Saved companies', settings: 'Settings' };
 function navigateWorkspace(view, { updateHistory = true, focus = false } = {}) {
   if (!Object.hasOwn(workspaceViews, view)) view = 'pipelines';
   currentView = view;
@@ -2043,7 +2109,7 @@ function navigateWorkspace(view, { updateHistory = true, focus = false } = {}) {
   });
   document.querySelectorAll('.view').forEach(panel => panel.classList.toggle('hidden', panel.id !== view));
   $('view-label').textContent = workspaceViews[view];
-  document.title = workspaceViews[view] + ' · Application Pipeline';
+  document.title = workspaceViews[view] + ' · DDoJA';
   $('detail').classList.toggle('hidden', view !== 'jobs' || !currentJobDetail);
   if (updateHistory && window.location.hash !== '#' + view) window.history.pushState({ view }, '', '#' + view);
   if (focus) $('workspace-main').focus({ preventScroll: true });
