@@ -67,7 +67,7 @@ try {
     Write-Output "Dashboard could not start: $launchFailure"
     if (!$NoBrowser) {
         $popup = New-Object -ComObject WScript.Shell
-        $popup.Popup($launchFailure, 0, 'Job Application Pipeline - startup problem', 16) | Out-Null
+        $popup.Popup($launchFailure, 0, 'DDoJA - startup problem', 16) | Out-Null
     }
     exit 1
 } finally {

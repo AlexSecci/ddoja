@@ -13,6 +13,16 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 MARKER_NAME = "mark_artifact_operation_started.mjs"
 
 
+def runtime_config():
+    """Portable checked-in defaults with private per-machine overrides."""
+    config = json.loads((CODE_ROOT / 'config/runtime.json').read_text(encoding='utf-8-sig'))
+    local = CODE_ROOT / 'config/runtime.local.json'
+    if local.is_file():
+        config.update(json.loads(local.read_text(encoding='utf-8-sig')))
+    return {key: os.path.expandvars(os.path.expanduser(value)) if isinstance(value, str) else value
+            for key, value in config.items()}
+
+
 def _version_key(path):
     parts = re.findall(r"\d+", path.name)
     return tuple(int(part) for part in parts) if parts else (0,)
@@ -69,7 +79,7 @@ def resolve_artifact_marker(configured):
 
 
 def render_package(store, manifest):
-    config = json.loads((CODE_ROOT / "config" / "runtime.json").read_text(encoding="utf-8-sig"))
+    config = runtime_config()
     sources = []
     package_root = (store.root / "artifacts" / "packages" / manifest["package_id"]).resolve()
     for item in manifest["files"]:
@@ -143,7 +153,7 @@ def render_agent_documents(store, published, *, worker_id: str | None = None):
     if len(entries) != len(files):
         raise ValueError("The published document list is inconsistent.")
 
-    config = json.loads((CODE_ROOT / "config" / "runtime.json").read_text(encoding="utf-8-sig"))
+    config = runtime_config()
     from .efficiency_features import features
     config['fit_pages']=features(store.root)['document_edits']
     renderer_sha256 = agent_renderer_fingerprint(config)
@@ -274,7 +284,7 @@ def _file_sha256(path_value: str | Path) -> str:
 def agent_renderer_fingerprint(config: dict | None = None) -> str:
     """Hash the actual renderer, marker, fonts, binaries, and style configuration."""
     if config is None:
-        config = json.loads((CODE_ROOT / "config" / "runtime.json").read_text(encoding="utf-8-sig"))
+        config = runtime_config()
     marker = resolve_artifact_marker(config.get("artifact_marker"))
     dependencies = {
         "renderer_script": CODE_ROOT / "tools" / "render_pdf.py",

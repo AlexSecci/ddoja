@@ -6,3 +6,27 @@ artifacts/
 *.log
 node_modules/
 
+# Private machine configuration and credentials.
+config/runtime.local.json
+.env
+.env.*
+!.env.example
+client_secret*.json
+credentials*.json
+*.dpapi
+*.pem
+*.p12
+*.key
+
+# Local applicant/browser evidence; keep outside published source history.
+/edu.yml
+/form-state-1.yml
+/options-spacex-history.yml
+/snap2.yml
+/spacex-8861910002-form-verified.yml
+/state2.yml
+/acceptance-audit.md
+/integration-status.md
+/implementation-plan.md
+.playwright-mcp/
+

@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "SQL upsert column references, not a credential value"
+regexTarget = "line"
+regexes = ['''owner=excluded\.owner,token=excluded\.token,lease_until=excluded\.lease_until''']

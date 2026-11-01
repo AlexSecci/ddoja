@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
-$shortcutPath = Join-Path $desktopDirectory 'Job Application Pipeline.lnk'
+$shortcutPath = Join-Path $desktopDirectory 'DDoJA.lnk'
 $launcherPath = Join-Path $taskRoot 'launch-dashboard.ps1'
 $iconPath = Join-Path $taskRoot 'app\static\dashboard.ico'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'

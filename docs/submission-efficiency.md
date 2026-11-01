@@ -46,7 +46,7 @@ limits. Late delivery wakes the same task without repeated model polling.
 5. Run from the project folder:
 
    ```powershell
-   .venv\Scripts\python.exe tools\configure_gmail_broker.py --client-file C:\private\desktop-client.json
+   .venv\Scripts\python.exe tools\configure_gmail_broker.py --client-file C:\private\desktop-client.json --expected-email applicant@example.invalid
    ```
 
 6. Complete Google's account selection and read-only consent. The tool verifies

@@ -1,6 +1,6 @@
 # Agent-driven pipeline: accepted implementation contract
 
-Updated 2026-10-29. This supersedes the earlier feed-first architecture and scripted semantic gates in implementation-plan.md. The user explicitly specified this workflow and answered the operating questions in this chat.
+Updated 2026-10-29. This describes the agent-driven workflow that supersedes the earlier feed-first architecture and scripted semantic gates.
 
 ## Decision authority
 

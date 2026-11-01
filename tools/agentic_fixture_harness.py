@@ -94,6 +94,10 @@ def _copy_runtime_tree(workspace: Path) -> None:
     (workspace / "config").mkdir(parents=True, exist_ok=True)
     for name in ("workers.json", "runtime.json"):
         shutil.copy2(PROJECT_ROOT / "config" / name, workspace / "config" / name)
+    # Local fixtures need the same installed renderer paths, never credentials.
+    local_runtime = PROJECT_ROOT / 'config/runtime.local.json'
+    if local_runtime.is_file():
+        shutil.copy2(local_runtime, workspace / 'config/runtime.local.json')
 
 
 def prepare_workspace(destination: Path | None = None) -> Path:

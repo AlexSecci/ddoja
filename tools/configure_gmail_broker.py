@@ -19,7 +19,9 @@ from app.provider_credentials import _dpapi
 SCOPE='https://www.googleapis.com/auth/gmail.readonly'
 
 
-def configure(client_file, root=ROOT, expected_email='applicant@example.invalid'):
+def configure(client_file, root=ROOT, expected_email=None):
+    if not expected_email or '@' not in expected_email:
+        raise ValueError('Specify the expected Gmail account with --expected-email before authorizing access.')
     client=json.loads(Path(client_file).read_text(encoding='utf-8')).get('installed')
     if not client or not client.get('client_id') or not client.get('client_secret'):
         raise ValueError('Provide a Google Desktop app client JSON file.')
@@ -66,6 +68,7 @@ def configure(client_file, root=ROOT, expected_email='applicant@example.invalid'
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--client-file',required=True)
+    parser.add_argument('--expected-email',required=True,help='Your Gmail account; verified before saving credentials.')
     args=parser.parse_args()
-    try:print(json.dumps(configure(args.client_file)))
+    try:print(json.dumps(configure(args.client_file,expected_email=args.expected_email)))
     except Exception as error:print(str(error) if isinstance(error,(ValueError,RuntimeError)) else 'Google setup failed: '+type(error).__name__);sys.exit(1)

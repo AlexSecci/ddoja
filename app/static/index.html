@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0c0d14">
-  <title>Application Pipeline</title>
+  <title>DDoJA — Distributed Dispatch of Job Applications</title>
   <link rel="icon" href="/static/orbit-mark.svg" type="image/svg+xml">
   <link rel="preload" href="/static/space-grotesk.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="preload" href="/static/dm-sans.ttf" as="font" type="font/ttf" crossorigin>
@@ -15,9 +15,9 @@
 <body>
   <a class="skip-link" href="#workspace-main">Skip to workspace</a>
   <aside class="sidebar" aria-label="Application workspace">
-    <a class="brand" href="/" aria-label="Application Pipeline home">
+    <a class="brand" href="/" aria-label="DDoJA home">
       <span class="brand-mark" aria-hidden="true">✳</span>
-      <span>APPLICATION<span class="brand-second">PIPELINE<span class="brand-period">.</span></span></span>
+      <span>DDoJA<span class="brand-second">JOB APPLICATIONS<span class="brand-period">.</span></span></span>
     </a>
     <p class="sidebar-label">Your command center</p>
     <nav aria-label="Workspace views" class="primary-nav">
@@ -31,7 +31,7 @@
     <div class="sidebar-callout"><span class="callout-orbit" aria-hidden="true">↗</span><strong>Built for your<br>next chapter.</strong><p>One company at a time.<br>Every opportunity considered.</p><button id="sidebar-launch" type="button" class="primary-button">New pipeline <span aria-hidden="true">+</span></button></div>
     <div class="sidebar-bottom">
       <button id="connection-toggle" type="button" class="connection-toggle"><span class="connection-icon" aria-hidden="true">⌁</span><span>Connection diagnostics<small id="connection-label">Status loading</small></span><span aria-hidden="true">↗</span></button>
-      <div class="profile-stamp"><span class="avatar">AS</span><span><strong>the applicant</strong><small>Personal workspace</small></span><span class="profile-lock" aria-label="Local workspace">⌂</span></div>
+      <div class="profile-stamp"><span class="avatar">DJ</span><span><strong>DDoJA workspace</strong><small>Local workspace</small></span><span class="profile-lock" aria-label="Local workspace">⌂</span></div>
     </div>
   </aside>
   <main id="workspace-main" tabindex="-1">
@@ -202,7 +202,7 @@
         <button id="deepseek-key-remove" type="button" class="quiet-button">Remove saved key</button>
       </section>
       <section class="panel"><h3>Playwright browser</h3><p id="playwright-readiness" class="hint">Checking installation…</p><p class="hint">Playwright uses a persistent browser profile for each worker, separate from your personal Chrome sessions. Existing sign-ins and saved passwords in personal Chrome are not shared. Native Chrome/CUA remains available for Codex workers.</p></section>
-      <section class="panel"><h3>Email verification broker</h3><p id="gmail-broker-status" class="hint">Checking connection…</p><p class="hint">Optional Gmail read-only OAuth retrieves fresh verification mail for the current owned application. Configure locally with .venv\Scripts\python.exe tools\configure_gmail_broker.py --client-file YOUR_PRIVATE_DESKTOP_CLIENT_JSON. Credentials are encrypted for this Windows user. Required application approvals remain in the inbox.</p></section>
+      <section class="panel"><h3>Email verification broker</h3><p id="gmail-broker-status" class="hint">Checking connection…</p><p class="hint">Optional Gmail read-only OAuth retrieves fresh verification mail for the current owned application. Configure locally with .venv\Scripts\python.exe tools\configure_gmail_broker.py --client-file YOUR_PRIVATE_DESKTOP_CLIENT_JSON --expected-email YOUR_GMAIL_ADDRESS. Credentials are encrypted for this Windows user. Required application approvals remain in the inbox.</p></section>
     </section>
 
     <section id="detail" class="detail-panel hidden" aria-labelledby="detail-title">
