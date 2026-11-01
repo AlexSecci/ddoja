@@ -52,6 +52,9 @@ class BrowserBridge:
 
     def call(self,name,arguments):
         if name not in {t['name'] for t in self.catalog}:raise ValueError('Browser tool is outside this worker allowlist.')
+        if self.role == 'discovery':
+            from app.discovery_browser import discovery_call
+            return discovery_call(self.rpc, name, arguments)
         if name=='browser_file_upload' and self.role=='submission':
             result=self.rpc.call(name,arguments)
             snapshot=self.rpc.call('browser_snapshot',{})
