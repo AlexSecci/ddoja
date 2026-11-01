@@ -16,9 +16,12 @@ def playwright_status(root):
     root = Path(root)
     node = shutil.which("node")
     try:
-        node = json.loads((root / "config/runtime.json").read_text()).get("node") or node
+        from .rendering import runtime_config
+        node = runtime_config(root).get('node') or node
     except (OSError, ValueError):
         pass
+    # Portable config may name a PATH command rather than an absolute file.
+    node = (shutil.which(str(node)) or (str(node) if Path(node).is_file() else None)) if node else None
     cli = root / "browser-runtime/node_modules/@playwright/mcp/cli.js"
     browser = next((p for base in (os.environ.get("PROGRAMFILES", ""), os.environ.get("PROGRAMFILES(X86)", ""), os.environ.get("LOCALAPPDATA", ""))
                     for p in (Path(base) / "Google/Chrome/Application/chrome.exe", Path(base) / "Microsoft/Edge/Application/msedge.exe") if p.is_file()), None)

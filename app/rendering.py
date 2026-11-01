@@ -13,10 +13,11 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 MARKER_NAME = "mark_artifact_operation_started.mjs"
 
 
-def runtime_config():
+def runtime_config(root=None):
     """Portable checked-in defaults with private per-machine overrides."""
-    config = json.loads((CODE_ROOT / 'config/runtime.json').read_text(encoding='utf-8-sig'))
-    local = CODE_ROOT / 'config/runtime.local.json'
+    root = Path(root) if root is not None else CODE_ROOT
+    config = json.loads((root / 'config/runtime.json').read_text(encoding='utf-8-sig'))
+    local = root / 'config/runtime.local.json'
     if local.is_file():
         config.update(json.loads(local.read_text(encoding='utf-8-sig')))
     return {key: os.path.expandvars(os.path.expanduser(value)) if isinstance(value, str) else value
