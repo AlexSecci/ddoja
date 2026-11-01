@@ -2361,7 +2361,7 @@ class Store:
             return result
 
     def _agent_record_discovery_inventory(self,db,worker,payload):
-        from .discovery_inventory import upsert,summary
+        from .discovery_inventory import upsert,summary,observed_listing_url
         entries=payload.get('listings')
         if not isinstance(entries,list) or not 1<=len(entries)<=50:
             raise ValueError('Record between 1 and 50 observed listing identities per batch.')
@@ -2372,7 +2372,7 @@ class Store:
         for entry in entries:
             if not isinstance(entry,dict) or not self._agent_url_allowed(entry.get('url'),test_only=bool(worker['agent_test_only'])):
                 raise ValueError('Every inventory entry needs its exact observed listing URL.')
-            if entry['url'] not in text:raise Conflict('A listing URL is absent from the current browser observation.')
+            if not observed_listing_url(text, entry['url']):raise Conflict('A listing URL is absent from the current browser observation.')
             old=db.execute('SELECT * FROM agent_discovery_inventory WHERE pipeline_id=? AND url=?',
                            (worker['pipeline_id'],entry['url'])).fetchone()
             title=entry.get('title') or (old['title'] if old else '')
@@ -4173,7 +4173,7 @@ class Store:
             worker_view.pop("result", None)
             notes = worker_view.get("context", {})
             bounded, used = {}, 0
-            priority = ["execution", "execution_handoff", "execution_change_deferred", "final_action_may_have_been_sent", "final_action_authorized_at", "tab_recovery", "question_reconsideration", "requested_artifacts",
+            priority = ["operator_instructions", "execution", "execution_handoff", "execution_change_deferred", "final_action_may_have_been_sent", "final_action_authorized_at", "tab_recovery", "question_reconsideration", "requested_artifacts",
                         "tab_id", "tab_url", "current_url", "page_cursor", "current_page", "remaining_paths"]
             for key in dict.fromkeys([*priority, *notes]):
                 if key not in notes or key == "instruction_digest":
@@ -4466,8 +4466,6 @@ class Store:
                                 + str(circuit["reason"] or "")]
             elif pipeline["discovery_status"] == "complete" and selected_terminal:
                 status, stage, blockers = "completed", "completed", []
-            elif counts["scored_backlog"] and pipeline["submission_paused"]:
-                status, stage, blockers = "awaiting_user", "submission_paused", ["New submissions are paused; scored jobs remain in the backlog."]
             elif pending_inbox:
                 status, stage, blockers = "awaiting_user", "awaiting_user", ["One or more workers are waiting for a user response."]
             elif any(row["state"] == "waiting_browser" for row in current_workers):
@@ -4489,6 +4487,8 @@ class Store:
                 if any(row["state"] == "failed" and row["role"] != "discovery"
                        for row in current_workers):
                     blockers.append("A worker failed; inspect its saved error before resuming.")
+            elif counts["scored_backlog"] and pipeline["submission_paused"]:
+                status, stage, blockers = "awaiting_user", "submission_paused", ["Scored backlog ready. Submissions are paused; discovery and evaluation are controlled independently."]
             else:
                 status, stage, blockers = "queued", "processing", []
         now = timestamp()

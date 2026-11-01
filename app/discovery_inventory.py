@@ -1,7 +1,27 @@
 """Durable native-observation inventory; agents, not title rules, select roles."""
 import re
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
+
+
+def observed_listing_url(text, url):
+    """Resolve native relative hrefs against observed page/navigation roots."""
+    if url in text:
+        return True
+    page = re.search(r'(?m)^- Page URL: (\S+)', text)
+    if not page:
+        return False
+    origin = urlsplit(page[1]); target = urlsplit(url)
+    if (target.scheme, target.netloc) != (origin.scheme, origin.netloc):
+        return False
+    hrefs = re.findall(r'(?m)^\s*- /url: (\S+)\s*$', text)
+    # Some SPAs use an application-root <base>. Native breadcrumb links expose
+    # that root even when the snapshot retains unexpanded href attributes.
+    bases = [page[1], *[urljoin(page[1], href) for href in hrefs
+             if href.startswith('/') and not href.startswith('//') and href.endswith('/')
+             and origin.path.startswith(href)]]
+    return any(urljoin(base, href) == url for base in bases for href in hrefs
+               if not urlsplit(href).scheme and not urlsplit(href).netloc)
 
 
 def native_text(payload):
@@ -92,6 +112,7 @@ def accounting(db,pipeline_id,coverage,worker_id=None):
     result=summary(db,pipeline_id)
     expected=coverage.get('listing_total')
     if expected is None:expected=coverage.get('enumerated_total')
+    if expected is None:expected=coverage.get('published_listing_total')
     expected=expected if type(expected) is int and expected>=0 else None
     if worker_id:
         current=db.execute('SELECT disposition,job_id,decision_source FROM agent_discovery_inventory WHERE pipeline_id=? AND worker_id=?',
