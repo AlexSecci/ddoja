@@ -57,6 +57,11 @@ class WorkerSettingsInput(Strict):
     roles: dict[str, WorkerChoice]
 
 
+class JobDocumentsInput(Strict):
+    artifacts: list[Literal['resume','cover_letter']] = Field(min_length=1,max_length=2)
+    execution: WorkerChoice | None = None
+
+
 class ProviderKeyInput(Strict):
     api_key: str = Field(min_length=1, max_length=4096, repr=False)
 
@@ -561,6 +566,14 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     @app.post('/api/jobs/{job_id}/manual-status')
     def manual_job_status(job_id: str, body: ManualJobStatus):
         result = store.set_manual_job_status(job_id, body.status, body.note)
+        app.state.agent_pipeline_manager.schedule()
+        return result
+
+    @app.post('/api/jobs/{job_id}/documents')
+    def request_job_documents(job_id: str, body: JobDocumentsInput):
+        from .document_requests import request as request_documents
+        result = request_documents(store,job_id,body.artifacts,
+            body.execution.model_dump() if body.execution else None)
         app.state.agent_pipeline_manager.schedule()
         return result
 

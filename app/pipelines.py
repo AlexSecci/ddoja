@@ -405,7 +405,7 @@ class AgentPipelineManager:
 
     def list_views(self):
         return [self.pipeline_view(item["id"]) for item in self.store.list_pipelines()
-                if item.get("mode") == "agentic"]
+                if item.get("mode") == "agentic" and not item.get('filters', {}).get('document_only')]
 
     def start(self, pipeline_id):
         pipeline = self.store.get_pipeline(pipeline_id)

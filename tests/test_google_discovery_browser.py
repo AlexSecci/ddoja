@@ -149,3 +149,27 @@ def test_apple_shallow_scoped_results_expand_only_that_observed_results_list():
     result=discovery_call(rpc,'browser_snapshot',{'target':'results','depth':4})
     assert rpc.calls[-1]==('browser_snapshot',{'target':'results'})
     assert result['_meta']['ddoja']['apple_results']['native_job_links']==1
+
+
+def test_discovery_tab_list_preserves_fresh_page_evidence_for_continuation():
+    tabs={'content':[{'type':'text','text':'### Result\n- 0: (current) Apple search'}]}
+    rpc=RPC([tabs,apple_snapshot()])
+    result=discovery_call(rpc,'browser_tabs',{'action':'list'})
+    assert rpc.calls==[('browser_tabs',{'action':'list'}),('browser_snapshot',{})]
+    assert 'Page URL: https://jobs.apple.com/en-us/search' in text_of(result)
+    assert '0: (current) Apple search' in text_of(result)
+
+
+def test_discovery_tab_permission_error_does_not_trigger_further_observation():
+    denied={'isError':True,'content':[{'type':'text','text':'Permission denied'}]}
+    rpc=RPC([denied])
+    assert discovery_call(rpc,'browser_tabs',{'action':'list'})==denied
+    assert len(rpc.calls)==1
+
+
+def test_tab_list_does_not_mask_a_results_observation_failure():
+    failed={'isError':True,'content':[{'type':'text','text':'Results did not load'}]}
+    rpc=RPC([{'content':[]},snapshot(cards=False),failed])
+    result=discovery_call(rpc,'browser_tabs',{'action':'list'})
+    assert result['isError'] is True
+    assert 'Results did not load' in text_of(result)

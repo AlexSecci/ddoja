@@ -25,6 +25,8 @@ credentials*.json
 /snap2.yml
 /spacex-8861910002-form-verified.yml
 /state2.yml
+/fw-jd.yml
+/jd-*.yml
 /acceptance-audit.md
 /integration-status.md
 /implementation-plan.md

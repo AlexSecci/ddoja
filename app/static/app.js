@@ -450,7 +450,8 @@ function artifactDownloadButton(artifactId, variant, filename, sha256, label, in
   const digest = sha256 ? ' · SHA-256 ' + sha256 : '';
   row.append(element('span', (filename || 'Document') + digest));
   row.append(button(label, 'small-button', async event => {
-    event.currentTarget.disabled = true;
+    const downloadControl = event.currentTarget;
+    downloadControl.disabled = true;
     try {
       const query = 'variant=' + encodeURIComponent(variant)
         + (index === null ? '' : '&index=' + encodeURIComponent(index));
@@ -462,7 +463,7 @@ function artifactDownloadButton(artifactId, variant, filename, sha256, label, in
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) { setStatus(error.message); }
-    finally { event.currentTarget.disabled = false; }
+    finally { downloadControl.disabled = false; }
   }));
   return row;
 }
@@ -1616,6 +1617,31 @@ async function markJobStatus(job, status) {
   finally { endAction(key); if (currentView === 'jobs') renderJobs(); }
 }
 
+function jobDocumentButtons(job) {
+  const group = element('div', undefined, 'job-manual-actions');
+  if (!job.document_generation_available) return group;
+  const request = job.document_request;
+  const active = request && ['queued', 'running', 'waiting_child', 'waiting_question', 'waiting_approval', 'quota_paused'].includes(request.state);
+  [['Write résumé', ['resume']], ['Write cover letter', ['cover_letter']], ['Write both', ['resume', 'cover_letter']]]
+    .forEach(([label, artifacts]) => {
+      const control = button(label, 'small-button', async () => {
+        const key = 'job-documents:' + job.id;
+        if (!beginAction(key)) return;
+        renderJobs();
+        try {
+          await api('jobs/' + segment(job.id) + '/documents', {method:'POST', body:JSON.stringify({artifacts})});
+          setStatus('Tailored documents queued using your résumé-writer settings. Downloads will appear on this record.');
+          await refreshDashboard();
+        } catch (error) { setStatus(error.message); }
+        finally { endAction(key); renderJobs(); }
+      });
+      control.disabled = active || actionInFlight('job-documents:' + job.id);
+      control.setAttribute('aria-label', label + ': ' + (job.title || 'Untitled role'));
+      group.append(control);
+    });
+  return group;
+}
+
 function renderJobs() {
   const body = $('job-rows'), nodes = [];
   const companySelect = $('jobs-company');
@@ -1660,6 +1686,17 @@ function renderJobs() {
     recordButton.setAttribute('aria-label', 'View record for ' + (job.title || 'untitled role') + ' at ' + (job.company_name || job.company_id || 'company'));
     action.append(recordButton);
     action.append(manualJobButtons(job));
+    action.append(jobDocumentButtons(job));
+    const documentRequest = job.document_request;
+    if (documentRequest) {
+      progress.append(element('p', 'Documents: ' + humanize(documentRequest.state)
+        + (!documentRequest.current ? ' · JD or profile changed' : ''), 'sub'));
+      if (documentRequest.error) progress.append(element('p', documentRequest.error, 'sub'));
+      (documentRequest.artifacts || []).forEach(artifact => {
+        action.append(artifactDownloadButton(artifact.id, 'pdf', artifact.kind === 'resume' ? 'resume.pdf' : 'cover-letter.pdf',
+          null, artifact.kind === 'resume' ? 'Download résumé' : 'Download cover letter'));
+      });
+    }
     row.append(role, score, location, stage, progress, action); nodes.push(row);
   });
   preserveViewport(body, () => reconcileChildren(body, nodes));

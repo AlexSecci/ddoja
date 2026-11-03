@@ -151,6 +151,13 @@ def discovery_call(rpc, name, arguments):
                         '_meta': {**result.get('_meta', {}), 'ddoja_navigation': {
                             'requested_tool': name, 'actual_tool': 'browser_navigate', 'observed_url': destination}}}
     result = rpc.call(name, arguments)
+    if name == 'browser_tabs' and not result.get('isError'):
+        # A tab inventory is not a page observation. Return a current native
+        # snapshot too, so a harmless list/select cannot erase owned-page
+        # evidence at the following discovery checkpoint.
+        snapshot = rpc.call('browser_snapshot', {})
+        snapshot = apple_results_evidence(rpc, results_evidence(rpc, snapshot))
+        return {**snapshot, 'content': [*result.get('content', []), *snapshot.get('content', [])]}
     if name in {'browser_snapshot', 'browser_navigate', 'browser_navigate_back', 'browser_click', 'browser_wait_for'}:
         scoped = arguments if name == 'browser_snapshot' else {}
         return apple_results_evidence(rpc, results_evidence(rpc, result, scoped), scoped)

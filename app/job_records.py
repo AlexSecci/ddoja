@@ -10,6 +10,8 @@ def records(store, *, state='all', company_id=None, order='score_desc', query=''
     if state not in STATES or order not in {'score_desc', 'score_asc', 'company'}:
         raise ValueError('Choose a supported job state and ordering.')
     with store.connect() as db:
+        from .document_requests import summaries
+        document_requests = summaries(db, store)
         profile = store.profile_version(db)
         rows = db.execute("SELECT j.*,c.name AS company_name,o.status AS application_status,"
             "o.provenance AS application_provenance,pj.pipeline_id,pj.fit_score,pj.fit_jd_version,"
@@ -57,6 +59,8 @@ def records(store, *, state='all', company_id=None, order='score_desc', query=''
             else:
                 status = 'unscored'
             job['record_status'] = status
+            job['document_generation_available'] = status not in {'submitted','discarded'}
+            job['document_request'] = document_requests.get(job['id'])
             job['manual_submitted_available'] = not job['worker_active'] and status != 'submitted'
             job['manual_discard_available'] = not job['worker_active'] and status not in {'submitted', 'discarded'}
             if company_id and job['company_id'] != company_id:

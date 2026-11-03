@@ -118,6 +118,8 @@ def desired_execution(root, db, worker):
     saved = read_settings(root, db)
     choice = dict(saved["roles"][ROLE_KEYS[worker["role"]]])
     context = json.loads(worker["context"]) if isinstance(worker["context"], str) else worker["context"]
+    if worker['role'] == 'document' and context.get('document_execution_override'):
+        choice = dict(context['document_execution_override'])
     previous = context.get("execution", {})
     session = worker["session_id"]
     if choice["provider"] == "openai" and (not previous or previous.get("provider") == "openai") and session:

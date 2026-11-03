@@ -49,6 +49,7 @@ AGENT_CAREER_SCOPE = {
 }
 
 AGENT_HOST_CONTEXT_KEYS = {
+    "document_only", "document_request_owner", "document_execution_override",
     "final_action_may_have_been_sent", "final_action_authorized_at", "final_action_review_item_id",
     "final_action_jd_version", "final_action_profile_version", "requested_artifacts",
     "document_package_id", "document_request_reason", "form_context", "draft_artifacts",
@@ -4398,7 +4399,8 @@ class Store:
                 if active >= cap:
                     return False
             elif row["role"] == "document":
-                parent = db.execute("SELECT state,jd_version,profile_version FROM agent_workers WHERE id=? AND pipeline_id=? AND role='submission'",
+                parent = db.execute("SELECT state,jd_version,profile_version FROM agent_workers WHERE id=? AND pipeline_id=? "
+                                    "AND (role='submission' OR (role='document' AND json_extract(context,'$.document_request_owner')=1))",
                                     (row["parent_id"], row["pipeline_id"])).fetchone()
                 if (not parent or parent["state"] != "waiting_child" or parent["jd_version"] != row["jd_version"]
                         or parent["profile_version"] != row["profile_version"]):
@@ -4466,6 +4468,16 @@ class Store:
             quota = self._agent_decode(db.execute("SELECT value FROM meta WHERE key='agent_quota_latch'").fetchone()[0], {})
             if quota.get("paused"):
                 status, stage, blockers = "quota_paused", "quota_paused", [quota.get("reason") or "Account quota pause."]
+            elif self._agent_decode(pipeline['filters'], {}).get('document_only'):
+                writers = [row for row in current_workers if not self._agent_decode(row['context'], {}).get('document_request_owner')]
+                if pending_inbox:
+                    status,stage,blockers='awaiting_user','documents',['Document writer needs a user response.']
+                elif any(row['state'] in {'failed','interrupted','stopped'} for row in writers):
+                    status,stage,blockers='blocked','documents',['Document generation needs attention.']
+                elif writers and all(row['state']=='completed' and not row['turn_active'] for row in writers):
+                    status,stage,blockers='completed','completed',[]
+                else:
+                    status,stage,blockers='running','documents',[]
             elif all(pipeline[name+'_paused'] for name in ('discovery','evaluation','submission')):
                 status,stage,blockers='awaiting_user','stages_paused',['All stages are paused. Start a stage to continue.']
             elif active:
@@ -4589,6 +4601,8 @@ class Store:
             row = db.execute("SELECT * FROM pipelines WHERE id=? AND mode='agentic'", (pipeline_id,)).fetchone()
             if not row:
                 raise KeyError(pipeline_id)
+            if self._agent_decode(row['filters'], {}).get('document_only'):
+                raise Conflict('This is a document-only request. It cannot start discovery, evaluation or submissions.')
             if row["status"] == "completed":
                 raise Conflict("A completed pipeline cannot be resumed.")
             if manual_start and row['status']=='stopping' and db.execute(
@@ -5574,8 +5588,12 @@ class Store:
                 context["manifest_sha256"] = digest(manifest_text)
         db.execute("UPDATE agent_workers SET context=?,state='completed',completed_at=?,updated_at=? WHERE id=?",
                    (json.dumps(context, ensure_ascii=False), timestamp(), timestamp(), worker_id))
-        db.execute("UPDATE agent_workers SET state='queued',resume_mode=?,checkpoint='documents_ready',updated_at=?,error='' WHERE id=?",
-                   ("same_session" if parent["session_id"] else "new_session", timestamp(), parent["id"]))
+        if context.get('document_request_owner'):
+            db.execute("UPDATE agent_workers SET context=?,state='completed',checkpoint='documents_ready',completed_at=?,updated_at=?,error='' WHERE id=?",
+                       (json.dumps(context,ensure_ascii=False),timestamp(),timestamp(),parent['id']))
+        else:
+            db.execute("UPDATE agent_workers SET state='queued',resume_mode=?,checkpoint='documents_ready',updated_at=?,error='' WHERE id=?",
+                       ("same_session" if parent["session_id"] else "new_session", timestamp(), parent["id"]))
         self.event(db, "agent.documents_ready", {"parent_worker_id": parent["id"], "document_worker_id": worker_id,
                    "package_id": package_id, "artifacts": context["ready_artifacts"]}, worker["job_id"], "agent_scheduler")
         return True
