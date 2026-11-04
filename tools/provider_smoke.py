@@ -1,4 +1,4 @@
-"""Opt-in integrated DeepSeek/Playwright acceptance on a local fictional listing.
+"""Opt-in integrated API-provider/Playwright acceptance on a fictional listing.
 
 Uses the configured paid provider only when --run-paid-test is supplied. The
 production ledger, campaigns, model preferences and browser profiles are untouched.
@@ -42,14 +42,18 @@ class FictionalListing(BaseHTTPRequestHandler):
         self.wfile.write(page.encode())
 
 
-def run():
+def run(provider='deepseek', model=None, effort=None):
     root = ROOT / "data/provider-smoke" / uuid.uuid4().hex
     _copy_runtime_tree(root)
     shutil.copy2(ROOT / "config/deepseek-models.json", root / "config/deepseek-models.json")
+    if provider=='opencode_go':
+        shutil.copy2(ROOT/'config/opencode-go-models.json',root/'config/opencode-go-models.json')
     shutil.copytree(ROOT / "browser-runtime/node_modules", root / "browser-runtime/node_modules")
     # Same Windows user can decrypt this isolated copy; it is never logged.
-    credential = ProviderCredentials(ROOT)
-    ProviderCredentials(root).save(credential.get())
+    credential = ProviderCredentials(ROOT,provider)
+    key=credential.get()
+    if not key:raise RuntimeError('Configure the selected provider API key before running this opt-in check.')
+    ProviderCredentials(root,provider).save(key)
     server = ThreadingHTTPServer(("127.0.0.1", 0), FictionalListing)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_port}/synthetic-job"
@@ -64,11 +68,17 @@ def run():
         "detail Single fictional page read and recorded, coverage {synthetic:true,pages_reviewed:1,remaining:[]}. "
         "Return required JSON disposition completed only after the durable finish succeeds."
     )
-    (root / "prompts/discovery_agent.md").write_text(instructions, encoding="utf-8")
-    (root / "prompts/agent_core.md").write_text("Follow the exact fictional test scope and report actual tool results honestly.", encoding="utf-8")
+    for name in ('discovery_agent.md','discovery_playwright.md'):
+        (root/'prompts'/name).write_text(instructions,encoding='utf-8')
+    for name in ('agent_core.md','agent_core_compact.md'):
+        (root/'prompts'/name).write_text('Follow the exact fictional test scope and report actual tool results honestly.',encoding='utf-8')
     store = Store(root)
     settings = store.get_worker_settings()
-    settings["roles"]["discovery"] = {"provider": "deepseek", "model": "deepseek-flash", "effort": "low", "browser_backend": "playwright"}
+    selected=next(p for p in settings['providers'] if p['id']==provider)
+    model=model or ('deepseek-v4.1-flash' if provider=='opencode_go' else 'deepseek-flash')
+    levels=next(m for m in selected['models'] if m['id']==model)['efforts']
+    effort=effort or next((e for e in ('low','high') if e in levels),levels[0])
+    settings["roles"]["discovery"] = {"provider": provider, "model": model, "effort": effort, "browser_backend": "playwright"}
     store.save_worker_settings(0, settings["roles"])
     pipeline = store.create_agent_pipeline("SYNTHETIC PROVIDER ACCEPTANCE", url, allow_http_loopback_test=True, test_only=True)
     worker = store.list_agent_workers(pipeline["id"])[0]
@@ -98,11 +108,17 @@ def run():
         return 0 if valid else 1
     finally:
         server.shutdown(); server.server_close()
-        ProviderCredentials(root).remove()
+        ProviderCredentials(root,provider).remove()
+        from app.browser_sessions import BrowserSessions
+        owned=BrowserSessions(root)
+        if owned.inspect(worker['id'])['state']=='live':owned.close(worker['id'])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-paid-test", action="store_true", required=True)
-    parser.parse_args()
-    raise SystemExit(run())
+    parser.add_argument('--provider',choices=['deepseek','opencode_go'],default='deepseek')
+    parser.add_argument('--model')
+    parser.add_argument('--effort')
+    args=parser.parse_args()
+    raise SystemExit(run(args.provider,args.model,args.effort))

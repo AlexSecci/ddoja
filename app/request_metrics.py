@@ -1,5 +1,6 @@
 """Actual provider-response usage and hash-only cache diagnostics."""
 import json
+import math
 from pathlib import Path
 import sqlite3
 import time
@@ -19,6 +20,7 @@ class RequestMetrics:
         with sqlite3.connect(self.path, timeout=15) as db:db.executescript(SCHEMA)
 
     def record(self, request_id, worker_id, run_id, execution, started, state, metadata, usage=None):
+        metadata=dict(metadata)
         values = [None]*4
         if usage:
             values = [usage.get('input_tokens'),(usage.get('input_tokens_details') or {}).get('cached_tokens'),
@@ -27,6 +29,16 @@ class RequestMetrics:
                 raise ValueError('Invalid provider usage counters.')
             if values[0] is not None and values[1] is not None and values[1] > values[0]:
                 raise ValueError('Provider cached input exceeds total input.')
+            def amount(value):
+                return type(value) in {int,float} and math.isfinite(value) and value>=0
+            if amount(usage.get('cost')):
+                metadata['reported_cost_usd']=usage['cost']
+            billing=usage.get('opencode') or {}
+            if isinstance(billing,dict):
+                safe={k:billing[k] for k in ('list_cost','allowance') if amount(billing.get(k))}
+                if billing.get('billing_source') in {'free','balance','go','go-plus','go-teams','byok'}:
+                    safe['billing_source']=billing['billing_source']
+                if safe:metadata['opencode']=safe
         with sqlite3.connect(self.path, timeout=15) as db:
             db.execute('INSERT INTO agent_provider_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?) '
                        'ON CONFLICT(request_id) DO UPDATE SET finished_at=excluded.finished_at,state=excluded.state,'
@@ -68,11 +80,17 @@ def diagnostics(db, pipeline_id=None):
     rows=db.execute('SELECT r.* FROM agent_provider_requests r JOIN agent_workers w ON w.id=r.worker_id '+
                     ('WHERE w.pipeline_id=? ' if pipeline_id else '')+'ORDER BY started_at', (pipeline_id,) if pipeline_id else ()).fetchall()
     known=[r for r in rows if r['input_tokens'] is not None]
+    deepseek=[r for r in known if json.loads(r['execution']).get('provider')=='deepseek']
+    meta=[json.loads(r['metadata']) for r in rows]
     total=sum(r['input_tokens'] for r in known);cached=sum(r['cached_input_tokens'] or 0 for r in known)
     return {'requests':len(rows),'measured_requests':len(known),'missing_usage_requests':len(rows)-len(known),
             'input_tokens':total,'cached_input_tokens':cached,'uncached_input_tokens':total-cached,
             'output_tokens':sum(r['output_tokens'] or 0 for r in known),'cache_hit_fraction':cached/total if total else None,
-            'peak_cost_estimate_usd':(cached*.006+(total-cached)*.30+sum(r['output_tokens'] or 0 for r in known)*1.20)/1e6,
+            'peak_cost_estimate_usd':sum(((r['cached_input_tokens'] or 0)*.006+
+                (r['input_tokens']-(r['cached_input_tokens'] or 0))*.30+(r['output_tokens'] or 0)*1.20)/1e6 for r in deepseek) if deepseek else None,
+            'cost_estimate_provider':'deepseek' if deepseek else None,
+            'reported_cost_usd':sum(m['reported_cost_usd'] for m in meta if 'reported_cost_usd' in m),
+            'opencode_allowance_usd':sum(m.get('opencode',{}).get('allowance',0) for m in meta),
             'recent':[{'request_id':r['request_id'],'worker_id':r['worker_id'],'run_id':r['run_id'],'state':r['state'],
                        'input_tokens':r['input_tokens'],'cached_input_tokens':r['cached_input_tokens'],
                        'metadata':json.loads(r['metadata'])} for r in rows[-12:]]}

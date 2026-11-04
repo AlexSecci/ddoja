@@ -1982,7 +1982,9 @@ function renderEfficiency() {
     nodes.push(efficiencyCard('Measured provider responses', requests.measured_requests));
     nodes.push(efficiencyCard('Provider responses missing usage', requests.missing_usage_requests));
     nodes.push(efficiencyCard('Provider cache hit rate', requests.cache_hit_fraction == null ? 'Unavailable' : (100 * requests.cache_hit_fraction).toFixed(1) + '%'));
-    nodes.push(efficiencyCard('Measured DeepSeek cost at peak rates', '$' + Number(requests.peak_cost_estimate_usd || 0).toFixed(4)));
+    if (requests.peak_cost_estimate_usd != null) nodes.push(efficiencyCard('Measured DeepSeek cost at peak rates', '$' + Number(requests.peak_cost_estimate_usd).toFixed(4)));
+    if (requests.opencode_allowance_usd > 0) nodes.push(efficiencyCard('OpenCode Go allowance consumed', '$' + Number(requests.opencode_allowance_usd).toFixed(4)));
+    if (requests.reported_cost_usd > 0) nodes.push(efficiencyCard('Provider-reported balance charges', '$' + Number(requests.reported_cost_usd).toFixed(4)));
     nodes.push(element('p', 'Provider response counters replace covered CLI turn counters; they are not added twice. Cost excludes supervisor work. Off-peak token prices are half.', 'sub'));
   }
   const timing = report.timing || {};

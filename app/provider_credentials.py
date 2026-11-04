@@ -13,7 +13,7 @@ _CREDENTIAL_LOCK = threading.RLock()
 
 def _dpapi(data, decrypt=False):
     if os.name != "nt":
-        raise RuntimeError("Encrypted credential storage requires Windows. Set DEEPSEEK_API_KEY in the service environment instead.")
+        raise RuntimeError("Encrypted credential storage requires Windows. Set the provider API key in the service environment instead.")
     class Blob(ctypes.Structure):
         _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_byte))]
     buf = ctypes.create_string_buffer(data)
@@ -36,8 +36,12 @@ def _dpapi(data, decrypt=False):
 
 
 class ProviderCredentials:
-    def __init__(self, root):
-        self.path = Path(root) / "data/secrets/deepseek.dpapi"
+    def __init__(self, root, provider='deepseek'):
+        from .inference_providers import API_PROVIDERS
+        if provider not in API_PROVIDERS:
+            raise ValueError('Unsupported credential provider.')
+        self.provider = API_PROVIDERS[provider]
+        self.path = Path(root) / ('data/secrets/'+provider+'.dpapi')
         self.lock = _CREDENTIAL_LOCK
 
     def get(self):
@@ -46,8 +50,8 @@ class ProviderCredentials:
                 try:
                     return _dpapi(base64.b64decode(self.path.read_bytes()), decrypt=True).decode("utf-8")
                 except (OSError, ValueError, UnicodeError):
-                    raise RuntimeError("The saved DeepSeek credential could not be read.") from None
-            return os.environ.get("DEEPSEEK_API_KEY", "").strip()
+                    raise RuntimeError("The saved provider credential could not be read.") from None
+            return os.environ.get(self.provider['env_key'], "").strip()
 
     def status(self):
         try:

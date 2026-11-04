@@ -539,16 +539,16 @@ def create_app(root=ROOT, *, agent_manager_factory=None, runtime_factory=None,
     def update_worker_settings(value: WorkerSettingsInput):
         return store.save_worker_settings(value.revision, {k: v.model_dump() for k, v in value.roles.items()})
 
-    @app.put("/api/settings/providers/deepseek/key")
-    def save_deepseek_key(value: ProviderKeyInput):
+    @app.put("/api/settings/providers/{provider}/key")
+    def save_provider_key(provider: Literal['deepseek','opencode_go'], value: ProviderKeyInput):
         try:
-            return app.state.provider_credentials.save(value.api_key)
+            return ProviderCredentials(root,provider).save(value.api_key)
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from None
 
-    @app.delete("/api/settings/providers/deepseek/key")
-    def remove_deepseek_key():
-        return app.state.provider_credentials.remove()
+    @app.delete("/api/settings/providers/{provider}/key")
+    def remove_provider_key(provider: Literal['deepseek','opencode_go']):
+        return ProviderCredentials(root,provider).remove()
 
     @app.get("/api/pipelines/{pipeline_id}/runtime-status")
     def runtime_status(pipeline_id: str):

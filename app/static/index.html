@@ -204,6 +204,13 @@
         <form id="deepseek-key-form" class="form-grid"><label class="field"><span>New API key</span><input id="deepseek-api-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096" required></label><div class="field field-action"><span aria-hidden="true">&nbsp;</span><button type="submit" class="outline-button">Save key</button></div></form>
         <button id="deepseek-key-remove" type="button" class="quiet-button">Remove saved key</button>
       </section>
+      <section class="panel provider-key-panel" aria-labelledby="opencode-go-key-heading">
+        <h3 id="opencode-go-key-heading">OpenCode Go subscription</h3><p id="opencode-go-key-status" class="hint">Checking configuration…</p>
+        <p class="hint">Use a personal API key from the workspace with your Go subscription. The key is encrypted for this Windows user. OpenCode login alone is not used by these workers.</p>
+        <p class="hint">Turn off Extra Usage in the OpenCode console for subscription-only use; otherwise OpenCode may charge your balance after the Go allowance is exhausted.</p>
+        <form id="opencode-go-key-form" class="form-grid"><label class="field"><span>New Go workspace API key</span><input id="opencode-go-api-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096" required></label><div class="field field-action"><span aria-hidden="true">&nbsp;</span><button type="submit" class="outline-button">Save key</button></div></form>
+        <button id="opencode-go-key-remove" type="button" class="quiet-button">Remove saved key</button>
+      </section>
       <section class="panel"><h3>Playwright browser</h3><p id="playwright-readiness" class="hint">Checking installation…</p><p class="hint">Playwright uses a persistent browser profile for each worker, separate from your personal Chrome sessions. Existing sign-ins and saved passwords in personal Chrome are not shared. Native Chrome/CUA remains available for Codex workers.</p></section>
       <section class="panel"><h3>Email verification broker</h3><p id="gmail-broker-status" class="hint">Checking connection…</p><p class="hint">Optional Gmail read-only OAuth retrieves fresh verification mail for the current owned application. Configure locally with .venv\Scripts\python.exe tools\configure_gmail_broker.py --client-file YOUR_PRIVATE_DESKTOP_CLIENT_JSON --expected-email YOUR_GMAIL_ADDRESS. Credentials are encrypted for this Windows user. Required application approvals remain in the inbox.</p></section>
     </section>

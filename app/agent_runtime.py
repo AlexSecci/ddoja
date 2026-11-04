@@ -45,7 +45,7 @@ ROLE_PROMPTS = {
 }
 CUA_ROLES = {"discovery", "evaluator", "submission"}
 AGENT_BRIDGE_NAME = "agent_bridge"
-_API_KEY_NAMES = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "DEEPSEEK_API_KEY")
+_API_KEY_NAMES = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "DEEPSEEK_API_KEY", "OPENCODE_API_KEY")
 
 
 class AgentRuntimeError(RuntimeError):
@@ -74,10 +74,11 @@ def _redacted_stderr_excerpt(lines: list[str], capability: str | None, limit: in
     text = "\n".join(lines)
     if capability:
         text = text.replace(capability, "[REDACTED_CAPABILITY]")
-    text = re.sub(r"(?i)\b(AGENT_CAPABILITY|OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|DEEPSEEK_API_KEY)\s*[:=]\s*[^\s,;]+",
+    text = re.sub(r"(?i)\b(AGENT_CAPABILITY|OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|DEEPSEEK_API_KEY|OPENCODE_API_KEY)\s*[:=]\s*[^\s,;]+",
                   r"\1=[REDACTED]", text)
     text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
     text = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[REDACTED_TOKEN]", text)
+    text = re.sub(r"\boc_sk_[A-Za-z0-9_-]{12,}\b", "[REDACTED_TOKEN]", text)
     return text[-limit:]
 
 
@@ -121,12 +122,15 @@ def _is_quota_error(error: dict[str, Any]) -> bool:
             continue
         separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", code)
         normalized = re.sub(r"[^a-z0-9]+", "_", separated.casefold()).strip("_")
-        if normalized in {"usage_limit_exceeded", "usage_limit", "quota_exceeded", "account_usage_limit"}:
+        if normalized in {"usage_limit_exceeded", "usage_limit", "quota_exceeded", "account_usage_limit",
+                          "insufficient_quota", "insufficient_balance", "go_usage_limit_exceeded", "billing_hard_limit_reached"}:
             return True
     # Some CLI builds expose only the provider's structured error message. Use
     # narrow full-message fallbacks; never classify a generic HTTP 429, model
     # prose, employer page text, or a broad mention of limits as account quota.
     for message in messages:
+        if re.search(r'\b402\s+Payment Required\b', message, re.IGNORECASE):
+            return True
         normalized_message = re.sub(r"\s+", " ", message).strip().casefold().rstrip(".! ")
         if normalized_message in {
             "usage limit exceeded",
@@ -287,6 +291,10 @@ class CodexAgentRuntime:
         if not isinstance(choice, dict) or not isinstance(choice.get("model"), str):
             raise AgentRuntimeError(f"No model is configured for the {role} role.")
         effort = choice.get("effort", "medium")
+        # The relay removes the reasoning field for provider-default models;
+        # keep a valid local CLI enum while never forcing it upstream.
+        if effort == 'default':
+            effort = 'high'
 
         args = [self.codex, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
                 "--color", "never", "--model", choice["model"], "-c", f'model_provider="{provider}"',
@@ -300,12 +308,15 @@ class CodexAgentRuntime:
                      "-c", "features.fast_mode=" + ("true" if tier == "fast" else "false")])
         if provider == "openai":
             args.extend(["-c", 'forced_login_method="chatgpt"'])
-        elif provider == "deepseek":
+        elif provider in {'deepseek','opencode_go'}:
+            from .inference_providers import API_PROVIDERS, write_go_cli_catalog
+            metadata = API_PROVIDERS[provider]
             # Do not force API login: that logs out the shared subscription CLI.
-            for key, value in {"name": "DeepSeek", "base_url": worker.get('_provider_base_url') or "https://api.deepseek.com", "wire_api": "responses",
-                               "env_key": "DEEPSEEK_API_KEY", "requires_openai_auth": False, "supports_websockets": False}.items():
-                args.extend(["-c", f"model_providers.deepseek.{key}=" + json.dumps(value)])
-            args.extend(["-c", "model_catalog_json=" + json.dumps(str(self.root / "config/deepseek-models.json")),
+            for key, value in {"name": metadata['name'], "base_url": worker.get('_provider_base_url') or metadata['base_url'], "wire_api": "responses",
+                               "env_key": metadata['env_key'], "requires_openai_auth": False, "supports_websockets": False}.items():
+                args.extend(["-c", f"model_providers.{provider}.{key}=" + json.dumps(value)])
+            catalog = write_go_cli_catalog(self.root,schema_path.parent) if provider == 'opencode_go' else self.root/'config/deepseek-models.json'
+            args.extend(["-c", "model_catalog_json=" + json.dumps(str(catalog)),
                          "-c", "model_supports_reasoning_summaries=false"])
         else:
             raise AgentRuntimeError("Unsupported worker provider.")
@@ -400,7 +411,7 @@ class CodexAgentRuntime:
                   'Then call the returned bridge tool; resource listing and shell probes cannot load it. Source handles are bridge '
                   'identifiers, not filesystem paths. Do not probe a shell, list MCP resources, search unrelated tool catalogs '
                   'or test placeholder commands. Only your role bridge and assigned browser adapter are available.\n\n')
-        if self._choice(worker).get('provider')=='deepseek':
+        if self._choice(worker).get('provider') in {'deepseek','opencode_go'}:
             routing=('TOOL ROUTING: Your exact role MCP schemas are supplied directly. First call '
                     'mcp__agent_bridge.get_context, optionally with needed source_ids, then use the advertised '
                     'bridge/browser functions. Do not use tool_search, resource listing, shell probes or placeholder '
@@ -798,15 +809,18 @@ class CodexAgentRuntime:
             env = codex_invocation_env(self.root, run_id, os.environ.copy())
             for key in _API_KEY_NAMES:
                 env.pop(key, None)
-            if choice.get("provider") == "deepseek":
+            if choice.get("provider") in {'deepseek','opencode_go'}:
                 from .provider_credentials import ProviderCredentials
-                key = ProviderCredentials(self.root).get()
+                from .inference_providers import API_PROVIDERS
+                provider = choice['provider'];metadata = API_PROVIDERS[provider]
+                key = ProviderCredentials(self.root,provider).get()
                 if not key:
-                    raise AgentRuntimeError("DeepSeek API key is not configured. Open Settings to add it.")
-                env["DEEPSEEK_API_KEY"] = key
+                    raise AgentRuntimeError(metadata['name']+" API key is not configured. Open Settings to add it.")
+                env[metadata['env_key']] = key
                 from .provider_telemetry import ProviderTelemetry
                 from .provider_telemetry import native_worker_tools
                 provider_proxy = ProviderTelemetry(self.root,worker['id'],run_id,choice,key,role=worker['role'],
+                    upstream=metadata['base_url'],session_id=worker.get('session_id') or worker['id'],
                     tool_catalog=lambda:native_worker_tools(self.root,worker))
                 worker['_provider_base_url'] = provider_proxy.url
             elif not self._login_ok(env):

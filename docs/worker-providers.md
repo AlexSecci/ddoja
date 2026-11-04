@@ -19,6 +19,22 @@ The default remains the existing subscription setup:
 
 DeepSeek uses the official Responses API through the same Codex CLI. The integrated model is `deepseek-flash` (currently V4.1 Flash 1017); its supported efforts are **low, high, max**. This is a rolling provider alias, not a frozen model version. Unsupported provider/model/effort combinations are rejected. No model call is made to populate settings or check local installation readiness.
 
+## OpenCode Go
+
+Choose **OpenCode Go subscription** for any worker role in Settings, then save a personal API key from the workspace with the Go subscription. An OpenCode login is not used for inference. The key is stored separately from DeepSeek, encrypted under `data/secrets/opencode_go.dpapi`; `OPENCODE_API_KEY` in the service environment is also supported. Keys are never returned by the dashboard or passed on the CLI command line. Existing ChatGPT login and other provider credentials are preserved.
+
+Workers use the existing Codex CLI harness with `wire_api=responses` and the official Go base URL `https://opencode.ai/inference/go/openai/v1`. The relay identifies itself as DDoJA-Codex and preserves native conversation headers plus a stable `x-opencode-session` for cache routing. The same scoped MCP bridge and Playwright tools remain in effect. Go does not use native CUA or Fast mode.
+
+The checked-in catalog is a metadata-only snapshot of the public [Go models endpoint](https://opencode.ai/inference/go/v1/models), including supported efforts, context limits and image capabilities. Models without adjustable effort display **Provider default**; their requests omit the upstream reasoning override. Document writers must support images for actual PDF preview inspection. Settings never make inference calls to populate this list.
+
+OpenCode controls Go allowances, model availability, workspace privacy, and optional **Extra Usage**. Turn Extra Usage off in the OpenCode console for subscription-only use; otherwise OpenCode can charge workspace balance after an allowance is exhausted. The pipeline records provider-reported balance cost, Go allowance consumption, cached/uncached input, output and reasoning tokens without storing prompts or credentials. Billing exhaustion pauses work and never redeems credits or restarts campaigns automatically. See [OpenCode's Codex configuration](https://opencode.ai/v2/docs/console/harnesses/codex/) and [Go documentation](https://opencode.ai/v2/docs/console/go/).
+
+An isolated, opt-in integration check uses only a fictional local listing:
+
+```powershell
+.venv\Scripts\python.exe tools\provider_smoke.py --run-paid-test --provider opencode_go --model deepseek-v4.1-flash
+```
+
 ## When a saved choice takes effect
 
 Each reserved invocation gets an execution snapshot. Saving settings does not interrupt or modify a running invocation. Its next start/resume uses the saved settings, including after a document wait, question, approval, interruption, or explicit quota resume.

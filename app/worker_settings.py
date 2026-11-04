@@ -42,6 +42,7 @@ def model_catalog(root):
                 or "fast" in data.get("additional_speed_tiers", [])) if data else slug in OPENAI_FAST_MODELS
         models.append({"id": slug, "name": label, "efforts": efforts,
                        "service_tiers": ["default", "fast"] if fast else ["default"]})
+    from .inference_providers import go_models
     return [
         {"id": "openai", "name": "Codex subscription", "authentication": "chatgpt", "models": models,
          "browser_backends": ["cua", "playwright"], "default_browser_backend": "cua"},
@@ -49,6 +50,8 @@ def model_catalog(root):
             {"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash 1017 (current alias)", "efforts": ["low", "high", "max"],
              "service_tiers": ["default"]}],
          "browser_backends": ["playwright"], "default_browser_backend": "playwright"},
+        {"id":"opencode_go", "name":"OpenCode Go subscription", "authentication":"api_key",
+         "models":go_models(root), "browser_backends":["playwright"], "default_browser_backend":"playwright"},
     ]
 
 
@@ -93,6 +96,8 @@ def validate_roles(root, roles):
         model = next((m for m in provider["models"] if m["id"] == choice.get("model")), None)
         if model is None or choice.get("effort") not in model["efforts"]:
             raise ValueError("Choose a supported model and reasoning effort.")
+        if role == 'materials' and model.get('supports_images') is False:
+            raise ValueError('Choose an image-capable résumé writer so it can inspect rendered PDF previews.')
         tier = choice.get("service_tier", "default")
         if tier not in model["service_tiers"]:
             raise ValueError("Choose a supported speed for this model and provider.")

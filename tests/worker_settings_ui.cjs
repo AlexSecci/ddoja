@@ -71,6 +71,18 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await evaluation.getByLabel('Model', { exact: true }).inputValue(), 'gpt-6.1-terra');
     assert.equal(await evaluation.getByLabel('Speed', { exact: true }).inputValue(), 'fast');
     assert.equal(saves, 2); assert.deepEqual(errors, []);
+    await evaluation.getByLabel('Provider', { exact: true }).selectOption('opencode_go');
+    await evaluation.getByLabel('Model', { exact: true }).selectOption('glm-5.2');
+    assert.deepEqual(await evaluation.getByLabel('Reasoning effort').locator('option').evaluateAll(nodes => nodes.map(n => n.value)), ['high', 'max']);
+    await evaluation.getByLabel('Model', { exact: true }).selectOption('kimi-k2.7-code');
+    assert.equal(await evaluation.getByLabel('Reasoning effort').inputValue(), 'default');
+    assert.equal(await evaluation.getByLabel('Browser', { exact: true }).inputValue(), 'playwright');
+    const materials = page.getByRole('group', { name: 'Résumé and cover letter', exact: true });
+    await materials.getByLabel('Provider', { exact: true }).selectOption('opencode_go');
+    assert.equal(await materials.getByLabel('Model', { exact: true }).locator('option[value="glm-5.2"]').count(), 0);
+    assert.equal(await materials.getByLabel('Model', { exact: true }).locator('option[value="deepseek-v4.1-flash"]').count(), 1);
+    assert.equal(await page.locator('#opencode-go-api-key').getAttribute('type'), 'password');
+    assert.deepEqual(errors, []);
     await page.screenshot({ path: process.argv[3], fullPage: true });
     console.log(JSON.stringify({ passed: true, saves, page_errors: errors.length }));
   } catch (error) {

@@ -12,7 +12,7 @@ DDoJA is a local dashboard and agent orchestration system for discovering jobs, 
 - **Submission** workers retain owned browser sessions, recover from interruptions, and preserve uncertain sends for reconciliation rather than silently submitting twice.
 - **The dashboard** provides independent campaign and stage controls, a scoped question/approval inbox, job records, and per-task token and timing metrics.
 
-Provider, model, reasoning effort, speed mode, and browser backend are configurable by worker role. Codex subscription models and the official DeepSeek API are supported. New settings apply at invocation boundaries; existing workers retain their execution snapshot. Playwright and native computer use remain selectable.
+Provider, model, reasoning effort, speed mode, and browser backend are configurable by worker role. Codex subscription models, the official DeepSeek API, and OpenCode Go subscriptions are supported. New settings apply at invocation boundaries; existing workers retain their execution snapshot. Playwright and native computer use remain selectable.
 
 The host handles persistence, worker scope, current evidence versions, ownership, deduplication and approvals. Agents interpret job requirements and applicant evidence. Human approval checkpoints remain tied to the exact current action and materials.
 

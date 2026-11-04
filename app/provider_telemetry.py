@@ -1,7 +1,7 @@
 """Loopback Responses relay: canonical JSON, streaming usage, hash-only traces.
 
 No prompts, response bodies, token values or Authorization headers are logged.
-The only production upstream is the user's selected official DeepSeek endpoint.
+Production upstreams are the selected provider's fixed official endpoint.
 """
 import hashlib
 import hmac
@@ -108,9 +108,10 @@ def request_shape(body, previous=()):
 
 
 class ProviderTelemetry:
-    def __init__(self, root, worker_id, run_id, execution, key, *, upstream='https://api.deepseek.com', role=None, tool_catalog=None):
+    def __init__(self, root, worker_id, run_id, execution, key, *, upstream='https://api.deepseek.com', role=None, tool_catalog=None, session_id=None):
         self.metrics=RequestMetrics(root);self.worker_id=worker_id;self.run_id=run_id;self.execution=execution
         self.role=role
+        self.session_id=session_id or worker_id
         self.catalog_source=tool_catalog;self.catalog=None
         self.key=key;self.upstream=upstream;self.nonce=uuid.uuid4().hex;self.previous=[];self.lock=threading.Lock()
         owner=self
@@ -129,6 +130,8 @@ class ProviderTelemetry:
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0<length<=64*1024*1024:raise ValueError('Invalid provider request size.')
                     body=json.loads(self.rfile.read(length))
+                    if owner.execution.get('provider') == 'opencode_go' and owner.execution.get('effort') == 'default':
+                        body.pop('reasoning',None)
                     offered=len(body.get('tools',[]))
                     if isinstance(body.get('tools'),list):
                         if owner.role is not None:body['tools']=scoped_tools(body['tools'],owner.role,owner.execution.get('browser_backend','none'))
@@ -150,7 +153,7 @@ class ProviderTelemetry:
                     owner.record(request_id,started,'started',metadata)
                     with httpx.Client(timeout=httpx.Timeout(180),trust_env=False,follow_redirects=False) as client:
                         with client.stream('POST',owner.upstream+'/responses',content=canonical(body).encode(),
-                                           headers={'Authorization':'Bearer '+owner.key,'Content-Type':'application/json','Accept-Encoding':'identity'}) as response:
+                                           headers=owner.upstream_headers(self.headers)) as response:
                             metadata['response_headers_seconds']=round(time.time()-started,4)
                             self.send_response(response.status_code)
                             self.send_header('Content-Type',response.headers.get('Content-Type','application/json'))
@@ -193,6 +196,18 @@ class ProviderTelemetry:
     def record(self,*args):
         request_id,started,state,metadata,*usage=args
         self.metrics.record(request_id,self.worker_id,self.run_id,self.execution,started,state,metadata,usage[0] if usage else None)
+
+    def upstream_headers(self, incoming):
+        headers={'Authorization':'Bearer '+self.key,'Content-Type':'application/json','Accept-Encoding':'identity'}
+        if self.execution.get('provider') == 'opencode_go':
+            headers['User-Agent']='DDoJA-Codex/1.0'
+            names=('x-opencode-session','session_id','x-codex-session-id','x-openai-codex-session-id')
+            for name in names:
+                value=incoming.get(name)
+                if value and len(value)<=256 and '\n' not in value and '\r' not in value:
+                    headers[name]=value
+            headers['x-opencode-session']=next((headers[n] for n in names if n in headers),self.session_id)
+        return headers
 
     def close(self):
         self.server.shutdown();self.server.server_close();self.thread.join(timeout=2)

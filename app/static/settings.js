@@ -24,12 +24,13 @@ function renderWorkerSettings() {
     function dependentFields(modelId, effortId, backendId, tierId) {
       while (grid.children.length > 1) grid.lastChild.remove();
       const p = workerSettings.providers.find(p => p.id === provider.select.value);
-      const model = settingsSelect('Model', p.models, modelId); model.select.name = 'model'; grid.append(model.field);
-      const effort = settingsSelect('Reasoning effort', p.models.find(m => m.id === model.select.value).efforts.map(id => ({ id })), effortId);
+      const models = p.models.filter(m => role !== 'materials' || m.supports_images !== false);
+      const model = settingsSelect('Model', models, modelId); model.select.name = 'model'; grid.append(model.field);
+      const effort = settingsSelect('Reasoning effort', models.find(m => m.id === model.select.value).efforts.map(id => ({ id, name:id === 'default' ? 'Provider default' : id })), effortId);
       effort.select.name = 'effort'; grid.append(effort.field);
       const speed = settingsSelect('Speed', [], ''); speed.select.name = 'service_tier'; grid.append(speed.field);
       function updateSpeed(value) {
-        const tiers = p.models.find(m => m.id === model.select.value).service_tiers || ['default'];
+        const tiers = models.find(m => m.id === model.select.value).service_tiers || ['default'];
         speed.select.replaceChildren();
         tiers.forEach(id => { const o = document.createElement('option'); o.value = id; o.textContent = id === 'fast' ? 'Fast (higher subscription usage)' : 'Standard'; speed.select.append(o); });
         speed.select.value = tiers.includes(value) ? value : 'default';
@@ -40,9 +41,9 @@ function renderWorkerSettings() {
       const browser = settingsSelect('Browser', backends.map(id => ({ id, name: ({ none: 'No browser', cua: 'Chrome / native CUA', playwright: 'Playwright (separate profile)' })[id] })), backendId || p.default_browser_backend);
       browser.select.name = 'browser_backend'; grid.append(browser.field);
       model.select.addEventListener('change', () => {
-        const levels = p.models.find(m => m.id === model.select.value).efforts;
+        const levels = models.find(m => m.id === model.select.value).efforts;
         const previous = effort.select.value; effort.select.replaceChildren();
-        levels.forEach(id => { const o = document.createElement('option'); o.value = id; o.textContent = id; effort.select.append(o); });
+        levels.forEach(id => { const o = document.createElement('option'); o.value = id; o.textContent = id === 'default' ? 'Provider default' : id; effort.select.append(o); });
         effort.select.value = levels.includes(previous) ? previous : levels.includes('high') ? 'high' : levels[0];
         updateSpeed(speed.select.value);
       });
@@ -51,9 +52,11 @@ function renderWorkerSettings() {
     provider.select.addEventListener('change', () => dependentFields(null, 'high', null));
     container.append(section);
   });
-  const credentials = workerSettings.credentials.deepseek;
-  settingsNode('deepseek-key-status').textContent = credentials.configured ? 'Configured · ' + (credentials.source === 'environment' ? 'service environment' : 'encrypted local storage') : credentials.error || 'No DeepSeek API key is configured.';
-  settingsNode('deepseek-key-remove').disabled = credentials.source !== 'encrypted_local';
+  [['deepseek','deepseek','DeepSeek'],['opencode_go','opencode-go','OpenCode Go']].forEach(([provider,id,name]) => {
+    const credentials = workerSettings.credentials[provider] || {};
+    settingsNode(id+'-key-status').textContent = credentials.configured ? 'Configured · ' + (credentials.source === 'environment' ? 'service environment' : 'encrypted local storage') : credentials.error || 'No '+name+' API key is configured.';
+    settingsNode(id+'-key-remove').disabled = credentials.source !== 'encrypted_local';
+  });
   const pw = workerSettings.playwright;
   settingsNode('playwright-readiness').textContent = pw.ready ? 'Installed and ready. No model call was made.' : 'Not ready. Install from the project folder: ' + pw.setup_command;
   settingsNode('settings-save').disabled = false;
@@ -90,20 +93,22 @@ settingsNode('worker-settings-form').addEventListener('submit', async event => {
     settingsNode('worker-settings-roles').querySelectorAll('fieldset').forEach(row => { row.disabled = false; });
   }
 });
-settingsNode('deepseek-key-form').addEventListener('submit', async event => {
-  event.preventDefault(); const input = settingsNode('deepseek-api-key'); const button = event.currentTarget.querySelector('button');
+[['deepseek','deepseek'],['opencode_go','opencode-go']].forEach(([provider,id]) => {
+settingsNode(id+'-key-form').addEventListener('submit', async event => {
+  event.preventDefault(); const input = settingsNode(id+'-api-key'); const button = event.currentTarget.querySelector('button');
   button.disabled = true;
   try {
-    const status = await api('settings/providers/deepseek/key', { method: 'PUT', body: JSON.stringify({ api_key: input.value }) });
-    settingsNode('deepseek-key-status').textContent = status.configured ? 'Configured · encrypted local storage' : 'Not configured';
-    settingsNode('deepseek-key-remove').disabled = !status.configured;
-  } catch (error) { settingsNode('deepseek-key-status').textContent = error.message; }
+    const status = await api('settings/providers/'+provider+'/key', { method: 'PUT', body: JSON.stringify({ api_key: input.value }) });
+    settingsNode(id+'-key-status').textContent = status.configured ? 'Configured · encrypted local storage' : 'Not configured';
+    settingsNode(id+'-key-remove').disabled = !status.configured;
+  } catch (error) { settingsNode(id+'-key-status').textContent = error.message; }
   finally { input.value = ''; button.disabled = false; }
 });
-settingsNode('deepseek-key-remove').addEventListener('click', async () => {
+settingsNode(id+'-key-remove').addEventListener('click', async () => {
   try {
-    const status = await api('settings/providers/deepseek/key', { method: 'DELETE' });
-    settingsNode('deepseek-key-status').textContent = status.configured ? 'Saved key removed. A service environment key remains configured.' : 'Saved key removed.';
-    settingsNode('deepseek-key-remove').disabled = true;
-  } catch (error) { settingsNode('deepseek-key-status').textContent = error.message; }
+    const status = await api('settings/providers/'+provider+'/key', { method: 'DELETE' });
+    settingsNode(id+'-key-status').textContent = status.configured ? 'Saved key removed. A service environment key remains configured.' : 'Saved key removed.';
+    settingsNode(id+'-key-remove').disabled = true;
+  } catch (error) { settingsNode(id+'-key-status').textContent = error.message; }
+});
 });

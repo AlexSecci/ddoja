@@ -140,7 +140,7 @@ class Store:
         with self.connect() as db:
             saved = read_settings(self.root, db)
         return {**saved, "providers": model_catalog(self.root), "role_labels": ROLE_LABELS,
-                "credentials": {"deepseek": ProviderCredentials(self.root).status()},
+                "credentials": {p: ProviderCredentials(self.root,p).status() for p in ('deepseek','opencode_go')},
                 "playwright": playwright_status(self.root)}
 
     def save_worker_settings(self, revision, roles):
