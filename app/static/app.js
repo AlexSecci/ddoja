@@ -11,6 +11,7 @@ let pipelineJobs = new Map();
 let pipelineInboxes = new Map();
 let workerRecords = new Map();
 let expandedPipelines = new Set();
+const expandedPipelineJobRecords = new Set();
 const discoveryInventories = new Map();
 const expandedDiscoveryInventories = new Set();
 let expandedLegacy = new Set();
@@ -971,26 +972,54 @@ function renderPipelineJobs(p, view) {
     section.append(element('p', 'No unsubmitted job records.', 'empty-state'));
     return section;
   }
-  const wrap = element('div', undefined, 'table-wrap'), table = element('table');
+  const wrap = element('div', undefined, 'table-wrap pipeline-job-records'), table = element('table', undefined, 'pipeline-job-table');
   const head = element('thead'), header = element('tr');
-  ['Role and location', 'Fit assessment', 'Application state', 'Checkpoint or adoption'].forEach(label => header.append(element('th', label)));
+  ['Role and location', 'Fit assessment', 'Application state', 'Checkpoint or adoption'].forEach(label => {
+    const cell = element('th', label); cell.scope = 'col'; header.append(cell);
+  });
   head.append(header); table.append(head);
   const body = element('tbody');
   rows.forEach(job => {
-    const row = withRenderKey(element('tr'), 'pipeline-job:' + job.id), role = element('td');
-    role.append(element('strong', job.title || job.job_title || 'Untitled listing'));
+    const title = job.title || job.job_title || 'Untitled listing';
+    const recordKey = p.id + ':' + job.id;
+    const expanded = expandedPipelineJobRecords.has(recordKey);
+    const row = withRenderKey(element('tr', undefined, expanded ? 'pipeline-job-row is-expanded' : 'pipeline-job-row'), 'pipeline-job:' + job.id);
+    row.dataset.jobId = job.id;
+    const role = element('td', undefined, 'pipeline-job-overview');
+    role.append(element('strong', title, 'pipeline-job-title'));
     if (job.url) {
-      role.append(document.createTextNode(' '), externalLink('Open listing', job.url));
+      const link = externalLink('Open listing', job.url);
+      link.classList.add('pipeline-job-link');
+      role.append(document.createTextNode(' '), link);
     }
-    role.append(element('p', [job.location, job.country, job.employment, job.arrangement].filter(Boolean).join(' · '), 'sub'));
-    if (job.selected === false) role.append(element('p', 'Excluded by this pipeline’s filters: ' + (job.excluded_reason || 'not selected'), 'sub'));
+    role.append(element('p', [job.location, job.country, job.employment && humanize(job.employment), job.arrangement && humanize(job.arrangement)].filter(Boolean).join(' · '), 'sub pipeline-job-location'));
+    if (job.selected === false) role.append(element('p', 'Excluded by this pipeline’s filters: ' + (job.excluded_reason || 'not selected'), 'sub pipeline-job-exclusion'));
+    const stateLabel = job.manual_status ? humanize(job.manual_status) + ' · manual' : humanize(job.application_status || job.run_status || 'not submitted');
+    const scoreLabel = job.fit_current && Number.isInteger(job.fit_score) ? job.fit_score + ' / 100'
+      : job.fit_jd_version != null ? 'Needs rescoring' : job.agent_decision ? 'Unscored legacy' : 'Awaiting score';
+    const compact = element('div', undefined, 'pipeline-job-mobile-summary');
+    compact.append(element('span', scoreLabel, 'badge fit-score'), element('span', stateLabel, 'badge'));
+    if (job.fit_current && job.fit_assessment?.eligibility === 'blocked') compact.append(element('span', 'Hard barrier', 'badge'));
+    role.append(compact);
+    const toggle = withRenderKey(button(expanded ? 'Hide details' : 'Show details', 'quiet-button pipeline-job-toggle', () => {
+      if (expandedPipelineJobRecords.has(recordKey)) expandedPipelineJobRecords.delete(recordKey);
+      else expandedPipelineJobRecords.add(recordKey);
+      if (currentView === 'companies') renderCompanies(); else renderPipelines();
+    }), 'expand-job:' + recordKey);
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.setAttribute('aria-label', (expanded ? 'Hide details for ' : 'Show details for ') + title);
+    const fieldPrefix = 'pipeline-job-' + p.id + '-' + job.id;
+    toggle.setAttribute('aria-controls', [fieldPrefix + '-fit', fieldPrefix + '-state', fieldPrefix + '-actions'].join(' '));
+    role.append(toggle);
     const decision = element('td');
+    decision.id = fieldPrefix + '-fit';
+    decision.append(element('strong', 'Fit assessment', 'pipeline-job-field-label'));
     if (job.fit_current && Number.isInteger(job.fit_score)) {
       const fit = job.fit_assessment || {};
       decision.append(element('strong', job.fit_score + ' / 100', 'fit-score'));
       decision.append(element('span', fit.eligibility === 'blocked' ? 'Hard barrier' : job.fit_score === 0 ? 'No fit · not queued' : 'Eligible', 'badge'));
       decision.append(element('p', 'Evidence confidence: ' + humanize(fit.confidence || 'unknown'), 'sub'));
-      const details = element('details');
+      const details = withRenderKey(element('details'), 'evidence:' + recordKey);
       details.append(element('summary', 'Requirements and evidence'));
       const list = element('ul');
       (fit.requirements || []).forEach(item => list.append(element('li', item.requirement + ' · ' + humanize(item.importance) + ' · ' + humanize(item.match) + ': ' + item.evidence)));
@@ -1001,12 +1030,17 @@ function renderPipelineJobs(p, view) {
       decision.append(element('span', job.fit_jd_version != null ? 'Needs rescoring' : job.agent_decision ? 'Unscored legacy assessment' : 'Awaiting score', 'badge'));
     }
     if (job.agent_reason || job.reason) {
-      decision.append(element('p', 'Evaluation-time rationale only; this is not a current submission authorization. ' + (job.agent_reason || job.reason), 'sub'));
+      const rationale = withRenderKey(element('details', undefined, 'pipeline-job-rationale'), 'rationale:' + recordKey);
+      rationale.append(element('summary', 'Evaluation rationale'), element('p', 'Evaluation-time rationale only; this is not a current submission authorization. ' + (job.agent_reason || job.reason), 'sub'));
+      decision.append(rationale);
     }
     const application = element('td');
-    application.append(element('span', job.manual_status ? humanize(job.manual_status) + ' · manual' : humanize(job.application_status || job.run_status || 'not submitted'), 'badge'));
+    application.id = fieldPrefix + '-state';
+    application.append(element('strong', 'Application state', 'pipeline-job-field-label'), element('span', stateLabel, 'badge'));
     if (job.application_provenance) application.append(element('p', job.application_provenance, 'sub'));
     const action = element('td');
+    action.id = fieldPrefix + '-actions';
+    action.append(element('strong', 'Actions', 'pipeline-job-field-label'));
     if (!job.manual_status && (job.run_status === 'submission_uncertain' || job.submission_uncertain)) {
       action.append(element('p', 'The final action may have happened. Reconcile saved session evidence; do not retry it.', 'worker-error'));
     }

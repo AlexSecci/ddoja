@@ -270,6 +270,14 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .technology-card-heading strong { font-family: 'Space Grotesk', sans-serif; font-size: 15px; font-weight: 500; color: #e0cceb; overflow-wrap: anywhere; }
 .technology-card > p { margin: 12px 0 0; color: #b4a0c4; font-size: 11px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .table-wrap { border-color: #342c40; background: #15131c; }
+.pipeline-job-mobile-summary, .pipeline-job-toggle, .pipeline-job-field-label { display: none; }
+.pipeline-job-table { table-layout: fixed; }
+.pipeline-job-table th:first-child { width: 28%; }
+.pipeline-job-table th:nth-child(2) { width: 32%; }
+.pipeline-job-table th:nth-child(3) { width: 16%; }
+.pipeline-job-table td { min-width: 0; overflow-wrap: anywhere; }
+.pipeline-job-table .badge { max-width: 100%; white-space: normal; }
+.pipeline-job-rationale { margin-top: 10px; }
 table { font-size: 11px; }
 th { background: #211b2a; color: #b3a0c3; font-size: 9px; letter-spacing: 1px; }
 th, td { padding: 16px; border-color: #342b3e; }
@@ -468,6 +476,36 @@ footer { margin-top: 25px; padding-top: 20px; color: #a08baa; border-color: #322
   .detail-summary-grid { grid-template-columns: 1fr; }
   footer { align-items: flex-start; flex-direction: column; gap: 7px; font-size: 8px; }
   .footer-slash { margin: 0 7px; }
+}
+@media (max-width: 1000px) {
+  .pipeline-jobs, .pipeline-job-records { min-width: 0; max-width: 100%; }
+  .pipeline-jobs .pipeline-job-records { border: 0; background: transparent; overflow: visible; }
+  .pipeline-job-table, .pipeline-job-table tbody, .pipeline-job-table tr, .pipeline-job-table td {
+    display: block; width: 100%; min-width: 0; max-width: 100%;
+  }
+  .pipeline-job-table thead { display: none; }
+  .pipeline-job-table tbody { display: grid; gap: 12px; }
+  .pipeline-job-table .pipeline-job-row { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: hidden; }
+  .pipeline-job-table td, .pipeline-job-table tbody tr:last-child td { padding: 14px; border: 0; font-size: 12px; }
+  .pipeline-job-table .pipeline-job-row > td:not(:first-child) { display: none; }
+  .pipeline-job-table .pipeline-job-row.is-expanded > td:not(:first-child) { display: block; border-top: 1px solid var(--line); }
+  .pipeline-job-title { display: block; font-size: 14px; line-height: 1.45; color: var(--ink); }
+  .pipeline-job-link { display: inline-block; padding: 7px 0; font-size: 12px; }
+  .pipeline-job-table .sub { font-size: 12px; line-height: 1.5; margin-bottom: 8px; }
+  .pipeline-job-table .pipeline-job-location, .pipeline-job-table .pipeline-job-exclusion { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .pipeline-job-row.is-expanded .pipeline-job-location, .pipeline-job-row.is-expanded .pipeline-job-exclusion { display: block; -webkit-line-clamp: unset; overflow: visible; }
+  .pipeline-job-mobile-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+  .pipeline-job-mobile-summary .badge { font-size: 11px; padding: 5px 8px; }
+  .pipeline-job-table .pipeline-job-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; padding: 10px 12px; margin-top: 12px; font-size: 12px; }
+  .pipeline-job-toggle::after { content: '+'; font-size: 18px; line-height: 1; }
+  .pipeline-job-toggle[aria-expanded="true"]::after { content: '−'; }
+  .pipeline-job-field-label { display: block; margin-bottom: 9px; color: var(--muted); font-size: 11px; }
+  .pipeline-job-table summary { min-height: 44px; padding: 10px 0; font-size: 12px; }
+  .pipeline-job-table ul { padding-left: 20px; }
+  .pipeline-job-table li + li { margin-top: 8px; }
+  .pipeline-job-table .small-button { min-height: 44px; font-size: 12px; white-space: normal; }
+  .pipeline-job-table .job-manual-actions { gap: 8px; flex-wrap: wrap; }
+  .pipeline-job-table .inline-provenance-form { min-width: 0; margin-top: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
