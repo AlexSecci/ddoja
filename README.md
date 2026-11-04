@@ -29,6 +29,8 @@ npm ci --prefix browser-runtime
 
 Open the dashboard at `http://127.0.0.1:8765`. Start campaigns and stages explicitly from the dashboard. Restarting the service preserves checkpoints and does not automatically resume a stopped campaign.
 
+For private phone access over the internet, see [Remote dashboard access](docs/remote-dashboard.md).
+
 For a background dashboard, use `.\launch-dashboard.ps1`. Run `.\install-desktop-shortcut.ps1` to install the **DDoJA** desktop shortcut. Existing shortcuts continue to work.
 
 ### Machine-specific rendering tools
