@@ -149,8 +149,47 @@ const rows = [{id:'1',title:'B',company_id:'b',company_name:'Beta',fit_score:0,f
 {id:'4',title:'D',company_id:'a',company_name:'Alpha',fit_score:null,fit_current:false,record_status:'unscored'}];
 assert.deepEqual(Array.from(ctx.filter(rows,{order:'company'}),r=>r.id),['3','2','4','1']);
 assert.deepEqual(Array.from(ctx.filter(rows,{order:'score_asc'}),r=>r.id),['1','2','3','4']);
-assert.deepEqual(Array.from(ctx.filter(rows,{state:'scored'}),r=>r.id),['3','2','1']);
+assert.deepEqual(Array.from(ctx.filter(rows,{state:'scored'}),r=>r.id),['2']);
+assert.deepEqual(Array.from(ctx.filter(rows,{state:'unscored'}),r=>r.id),['4']);
+assert.deepEqual(Array.from(ctx.filter(rows,{state:'discarded'}),r=>r.id),['1']);
 assert.equal(ctx.filter(rows,{company:'a',state:'submitted'}).length,1);
 assert.equal(ctx.filter(rows,{query:'Beta'})[0].id,'1');
 '''
     subprocess.run(['node', '-e', script, str(path)], check=True, capture_output=True, text=True)
+
+
+def test_every_catalog_state_filter_matches_the_displayed_status(tmp_path):
+    from app.job_records import STATES
+
+    states = sorted(STATES - {'all'})
+    store, pipeline, _, _, _ = seed(tmp_path, len(states))
+    workers = evaluate_all(store, pipeline, [70] * len(states))
+    by_state = dict(zip(states, workers))
+    # Keep scores on terminal records to reproduce the misleading Scored filter.
+    for state in ('submitted', 'discarded'):
+        store.set_manual_job_status(by_state[state]['job_id'], state)
+    with store.connect(write=True) as db:
+        for state in ('unscored', 'legacy', 'failed'):
+            db.execute("UPDATE pipeline_jobs SET fit_score=NULL,fit_jd_version=NULL,"
+                       "fit_profile_version=NULL,agent_decision='',agent_status='selected' WHERE job_id=?",
+                       (by_state[state]['job_id'],))
+        db.execute("UPDATE pipeline_jobs SET agent_decision='approve' WHERE job_id=?",
+                   (by_state['legacy']['job_id'],))
+        db.execute("UPDATE pipeline_jobs SET fit_profile_version=-1 WHERE job_id=?",
+                   (by_state['needs_rescoring']['job_id'],))
+        db.execute("UPDATE jobs SET run_status='submission_uncertain' WHERE id=?",
+                   (by_state['uncertain']['job_id'],))
+        db.execute("UPDATE pipeline_jobs SET selected=0 WHERE job_id=?", (by_state['excluded']['job_id'],))
+        db.execute("UPDATE agent_workers SET turn_active=1 WHERE id=?", (by_state['active']['id'],))
+        db.execute("UPDATE agent_workers SET state='failed' WHERE id=?", (by_state['failed']['id'],))
+
+    app = create_app(tmp_path, agent_manager_factory=IsolatedAgentManager)
+    with TestClient(app) as client:
+        headers = {'X-Pipeline-Token': client.get('/api/session').json()['token']}
+        all_rows = client.get('/api/jobs', headers=headers).json()
+        assert len(all_rows) == len(states)
+        assert {row['record_status'] for row in all_rows} == set(states)
+        for state, worker in by_state.items():
+            rows = client.get('/api/jobs', params={'state': state}, headers=headers).json()
+            assert [row['id'] for row in rows] == [worker['job_id']], state
+            assert rows[0]['record_status'] == state

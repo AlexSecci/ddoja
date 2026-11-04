@@ -3,6 +3,7 @@ let pipelines = [];
 let jobs = [];
 let jobPage = 0;
 const jobsPerPage = 20;
+const expandedAllJobRecords = new Set();
 let technologies = [];
 let companies = [];
 let legacyQuestions = [];
@@ -1646,9 +1647,9 @@ function renderSummary() {
   const root = $('summary'), nodes = [];
   [
     ['Job records', jobs.length],
-    ['Recorded as submitted', jobs.filter(job => job.phase === 'submitted').length],
+    ['Recorded as submitted', jobs.filter(job => job.record_status === 'submitted').length],
     ['Companies with saved jobs', new Set(jobs.map(job => job.company_id).filter(Boolean)).size],
-    ['Scored jobs', jobs.filter(job => job.fit_current).length],
+    ['Scored jobs', jobs.filter(job => job.record_status === 'scored').length],
   ].forEach(([label, value]) => {
     const card = withRenderKey(element('div', undefined, 'summary-card'), 'summary:' + label);
     card.append(element('strong', count(value)), element('span', label)); nodes.push(card);
@@ -1658,8 +1659,7 @@ function renderSummary() {
 function filterJobRecords(records, { query = '', company = '', state = 'all', order = 'score_desc' } = {}) {
   const text = query.trim().toLocaleLowerCase();
   return records.filter(job => (!company || job.company_id === company)
-    && (state === 'all' || (state === 'scored' ? job.fit_current === true
-      : state === 'unscored' ? job.fit_current !== true : job.record_status === state))
+    && (state === 'all' || job.record_status === state)
     && [job.title, job.company_name, job.location, job.requisition_id]
       .some(value => String(value || '').toLocaleLowerCase().includes(text)))
     .sort((a, b) => {
@@ -1757,15 +1757,34 @@ function renderJobs() {
     preserveViewport(body, () => reconcileChildren(body, nodes)); return;
   }
   filtered.slice(first, first + jobsPerPage).forEach(job => {
-    const row = withRenderKey(element('tr'), 'job:' + job.id), role = element('td');
-    role.append(element('strong', job.title || 'Untitled role'), element('p', job.company_name || job.company_id || '', 'sub'));
+    const expanded = expandedAllJobRecords.has(job.id);
+    const row = withRenderKey(element('tr', undefined, 'all-job-row' + (expanded ? ' is-expanded' : '')), 'job:' + job.id);
+    row.dataset.jobId = job.id;
+    const role = element('td');
+    role.append(element('strong', job.title || 'Untitled role', 'all-job-title'), element('p', job.company_name || job.company_id || '', 'sub'));
     if (job.requisition_id) role.append(element('p', 'Req ' + job.requisition_id, 'sub'));
-    if (job.url) { const link = element('a', 'Open listing'); link.href = job.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; role.append(link); }
-    const score = element('td'); score.append(element('span', job.fit_current ? String(job.fit_score) + '/100' : 'Unscored', 'badge'));
-    const location = element('td', job.location || 'Unknown');
+    if (job.url) { const link = element('a', 'Open listing', 'all-job-link'); link.href = job.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; role.append(link); }
+    role.append(element('p', job.location || 'Unknown location', 'sub all-job-mobile-location'));
+    const scoreText = job.fit_current ? String(job.fit_score) + '/100' : 'Unscored';
     const jobState = job.record_status || job.phase || 'unknown';
+    const statusClass = 'badge status-' + String(jobState).replace(/[^a-z_]/g, '');
+    const mobileSummary = element('div', undefined, 'all-job-mobile-summary');
+    mobileSummary.append(element('span', scoreText, 'badge'), element('span', humanize(jobState), statusClass));
+    role.append(mobileSummary);
+    const detailIds = ['score', 'location', 'state', 'progress', 'actions'].map(field => 'all-job-' + job.id + '-' + field);
+    const toggle = button(expanded ? 'Hide details' : 'Show details', 'small-button all-job-toggle', () => {
+      if (expandedAllJobRecords.has(job.id)) expandedAllJobRecords.delete(job.id);
+      else expandedAllJobRecords.add(job.id);
+      renderJobs();
+    });
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.setAttribute('aria-controls', detailIds.join(' '));
+    toggle.setAttribute('aria-label', (expanded ? 'Hide' : 'Show') + ' details for ' + (job.title || 'untitled role') + ' at ' + (job.company_name || job.company_id || 'company'));
+    role.append(toggle);
+    const score = element('td'); score.append(element('span', scoreText, 'badge'));
+    const location = element('td', job.location || 'Unknown');
     const stage = element('td');
-    stage.append(element('span', humanize(jobState), 'badge status-' + String(jobState).replace(/[^a-z_]/g, '')));
+    stage.append(element('span', humanize(jobState), statusClass));
     const progress = element('td', job.manual_status ? 'Manually marked ' + humanize(job.manual_status) + '. ' + (job.manual_status_note || '')
       : job.application_provenance || (job.phase === 'submitted' ? 'Submission recorded' : job.run_status && job.run_status !== 'idle' ? humanize(job.run_status) : 'Saved record'));
     const action = element('td');
@@ -1784,6 +1803,10 @@ function renderJobs() {
           null, artifact.kind === 'resume' ? 'Download résumé' : 'Download cover letter'));
       });
     }
+    [score, location, stage, progress, action].forEach((cell, index) => {
+      cell.id = detailIds[index];
+      cell.prepend(element('strong', ['Score', 'Location', 'State', 'Details', 'Actions'][index], 'all-job-field-label'));
+    });
     row.append(role, score, location, stage, progress, action); nodes.push(row);
   });
   preserveViewport(body, () => reconcileChildren(body, nodes));

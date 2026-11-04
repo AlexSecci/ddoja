@@ -65,11 +65,7 @@ def records(store, *, state='all', company_id=None, order='score_desc', query=''
             job['manual_discard_available'] = not job['worker_active'] and status not in {'submitted', 'discarded'}
             if company_id and job['company_id'] != company_id:
                 continue
-            if state == 'scored' and not job['fit_current']:
-                continue
-            if state == 'unscored' and job['fit_current']:
-                continue
-            if state not in {'all', 'scored', 'unscored'} and status != state:
+            if state != 'all' and status != state:
                 continue
             if query and query.casefold() not in ' '.join(str(job.get(k) or '') for k in
                     ('title', 'company_name', 'location', 'requisition_id')).casefold():

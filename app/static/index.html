@@ -143,9 +143,9 @@
         <label>Order<select id="jobs-order"><option value="score_desc">Score: highest first</option><option value="score_asc">Score: lowest first</option><option value="company">Company, then highest score</option></select></label>
         <button id="refresh" type="button">Refresh</button>
       </div>
-      <p class="hint">Scores use the current job and applicant evidence. Unscored records sort last. Manual submitted/discarded decisions prevent future applications across campaigns.</p>
-      <div class="table-wrap">
-        <table>
+      <p class="hint">State filters match each record’s displayed status. Scores use the current job and applicant evidence; unscored records sort last. Manual submitted/discarded decisions prevent future applications across campaigns.</p>
+      <div class="table-wrap all-job-records">
+        <table class="all-job-table">
           <thead><tr><th>Role</th><th>Score</th><th>Location</th><th>State</th><th>Details</th><th>Actions</th></tr></thead>
           <tbody id="job-rows"></tbody>
         </table>
