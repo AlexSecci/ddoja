@@ -258,25 +258,78 @@ document.addEventListener('compositionstart', event => { if (event.target) event
 document.addEventListener('compositionend', event => { if (event.target) event.target.__pipelineComposing = false; }, true);
 const pipelineOf = view => view && view.pipeline ? view.pipeline : (view || {});
 const countsOf = view => view && view.counts ? view.counts : (pipelineOf(view).counts || {});
-async function api(path, options = {}) {
+let apiSessionRefresh = null;
+let loginRedirecting = false;
+function requireDashboardLogin() {
+  if (loginRedirecting) return;
+  loginRedirecting = true;
+  window.location.replace('/login?next=' + encodeURIComponent(window.location.pathname + window.location.hash));
+}
+async function renewDashboardToken() {
+  if (!apiSessionRefresh) {
+    apiSessionRefresh = (async () => {
+      const response = await fetch('/api/session', {credentials: 'same-origin', cache: 'no-store', headers: {Accept: 'application/json'}});
+      const value = await response.json();
+      if (response.status === 401 && value.login_required) requireDashboardLogin();
+      if (!response.ok || typeof value.token !== 'string' || !value.token) throw new Error('Your dashboard session could not be refreshed. Reload this page.');
+      token = value.token;
+    })().finally(() => { apiSessionRefresh = null; });
+  }
+  return apiSessionRefresh;
+}
+async function api(path, options = {}, canRefreshSession = true) {
   const method = String(options.method || 'GET').toUpperCase();
-  if (method !== 'GET' && method !== 'HEAD') dataRevision += 1;
+  if (canRefreshSession && method !== 'GET' && method !== 'HEAD') dataRevision += 1;
   const headers = {
     Accept: 'application/json',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
     'X-Pipeline-Token': token,
     ...options.headers,
   };
-  const response = await fetch('/api/' + path, { ...options, method, headers });
+  const response = await fetch('/api/' + path, { credentials: 'same-origin', ...options, method, headers });
+  if (!response.ok) {
+    const raw = await response.text();
+    let result = {};
+    try { result = raw ? JSON.parse(raw) : {}; } catch (_) { /* Do not render an HTML login/error response as dashboard data. */ }
+    if (response.status === 403 && result.detail === 'Local dashboard session required.' && canRefreshSession && path !== 'session') {
+      // This exact middleware rejection happens before any action executes.
+      // Other errors and ambiguous network sends are never retried here.
+      await renewDashboardToken();
+      return api(path, options, false);
+    }
+    if (response.status === 401 && result.login_required) requireDashboardLogin();
+    throw new Error(result.detail || response.statusText || 'The request failed.');
+  }
   if (options.expectBlob) {
-    if (!response.ok) throw new Error((await response.text()) || response.statusText);
     return response.blob();
   }
   const raw = await response.text();
   let result = {};
-  if (raw) { try { result = JSON.parse(raw); } catch (_) { result = { detail: raw }; } }
-  if (!response.ok) throw new Error(result.detail || response.statusText || 'The request failed.');
+  if (raw) { try { result = JSON.parse(raw); } catch (_) { throw new Error('The dashboard returned an unexpected response. Reload this page.'); } }
   return result;
+}
+async function configureRemoteSignout() {
+  if (window.location.protocol !== 'https:') return;
+  try {
+    const response = await fetch('/auth/status', {credentials: 'same-origin', cache: 'no-store'});
+    if (!response.ok) return;
+    const auth = await response.json();
+    if (!auth.authenticated) return;
+    const control = $('remote-signout');
+    if (!control) return;
+    control.hidden = false; control.classList.remove('hidden');
+    const badge = document.querySelector('.local-badge');
+    if (badge) badge.textContent = 'Signed in';
+    control.onclick = async () => {
+      control.disabled = true;
+      try {
+        const current = await fetch('/auth/status', {credentials: 'same-origin', cache: 'no-store'}).then(r => r.json());
+        const result = await fetch('/auth/logout', {method: 'POST', credentials: 'same-origin', headers: {'X-DDoJA-CSRF': current.csrf || ''}});
+        if (!result.ok) throw new Error('Sign-out failed. Reload this page and try again.');
+        window.location.replace('/login');
+      } catch (error) { setStatus(error.message); control.disabled = false; }
+    };
+  } catch (_) { /* Local dashboards do not require a remote-login service. */ }
 }
 function setStatus(message) { $('status').textContent = message; }
 function completionOf(view) {
@@ -2202,6 +2255,7 @@ $('browser-check-form').addEventListener('submit', async event => {
 async function bootstrap() {
   const session = await api('session');
   token = session.token;
+  await configureRemoteSignout();
   const initialView = window.location.hash.slice(1);
   if (Object.hasOwn(workspaceViews, initialView) && initialView !== currentView) {
     currentView = initialView;

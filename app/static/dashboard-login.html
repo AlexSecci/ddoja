@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sign in · DDoJA</title>
+  <link rel="stylesheet" href="/auth/assets/login.css">
+</head>
+<body>
+  <main class="login-card">
+    <span class="brand">✳ DDoJA</span>
+    <h1 id="heading">Your workspace.</h1>
+    <p id="intro">Sign in to your dashboard. This browser will remember you for 90 days.</p>
+    <form id="login-form">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required minlength="2" maxlength="64" autocapitalize="none" spellcheck="false">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+      <p id="password-help" hidden>Use a password or passphrase of at least 15 characters.</p>
+      <button id="submit" type="submit">Sign in</button>
+    </form>
+    <p id="message" role="status" aria-live="polite"></p>
+  </main>
+  <script src="/auth/assets/login.js"></script>
+</body>
+</html>
